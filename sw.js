@@ -1,4 +1,4 @@
-const CACHE_NAME = 'kasir-toko-v38';
+const CACHE_NAME = 'kasir-toko-v39';
 const ASSETS = [
   './',
   './index.html',
