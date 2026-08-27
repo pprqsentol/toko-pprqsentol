@@ -436,6 +436,7 @@ function labelTiket(tiket){
   if(tiket.tipe === 'kas_mutasi_baru') return `Kas ${p.arah==='masuk'?'masuk':'keluar'}: ${labelKategoriKas(p.arah,p.kategori)} ${rupiah(p.jumlah||0)}`;
   if(tiket.tipe === 'kas_mutasi_hapus') return `Hapus catatan kas`;
   if(tiket.tipe === 'kas_awal_update') return `Update kas awal: ${rupiah(p.kasAwal||0)}`;
+  if(tiket.tipe === 'transaksi_batal') return `Batalkan transaksi`;
   return tiket.tipe;
 }
 function perbaruiBadgeAntrean(){
@@ -639,6 +640,13 @@ async function prosesTiket(tiket){
         if(document.getElementById('tabelRiwayatWrap')) renderTabelRiwayat();
       }
     }
+  } else if(tiket.tipe === 'transaksi_batal'){
+    // Kirim pembatalan ke server lewat RPC batalkan_transaksi_toko, pakai client_id (bukan id server)
+    // supaya tetap jalan walau tiket 'transaksi_toko' aslinya belum sempat terkirim saat tiket batal ini
+    // dibuat — asal urutan antrean FIFO, tiket pembuatannya pasti diproses duluan, jadi saat tiket batal
+    // ini giliran jalan, baris transaksi_toko-nya (dicari via client_id) sudah pasti ada di server.
+    const { error } = await sb.rpc('batalkan_transaksi_toko', { p_client_id: tiket.payload.clientId });
+    if(error) throw error;
   }
 }
 
@@ -2172,29 +2180,24 @@ function batalkanTransaksi(id){
   const t = cariTransaksiLokal(id);
   if(!t){ toast('Transaksi ini dibuat di perangkat lain — tidak bisa diubah dari perangkat ini'); return; }
   if(t.dibatalkan) return;
-  let pesan = 'Batalkan transaksi ini?';
-  if(t.tipe==='jual') pesan = `Batalkan transaksi penjualan ini? Stok produk akan dikembalikan${t.metode==='saldo' ? ` dan saldo ${t.anggotaNama||'anggota'} akan dikembalikan sebesar ${rupiah(t.total)}` : t.metode==='hutang' ? ` dan catatan hutang ${t.anggotaNama||'pembeli'} akan dihapus` : ''}.`;
-  else if(t.tipe==='topup') pesan = `Batalkan top up ini? Saldo ${t.anggotaNama||'anggota'} akan dikurangi ${rupiah(t.total)}.`;
-  else if(t.tipe==='tarik') pesan = `Batalkan tarik tunai ini? Saldo ${t.anggotaNama||'anggota'} akan ditambah kembali ${rupiah(t.total)}. Pastikan uang tunai yang sudah diserahkan diminta kembali dari anggota.`;
+  // Top Up & Tarik Tunai BUKAN milik kasir-toko — datanya cuma dibaca dari Aplikasi Keuangan
+  // lewat sinkronisasi. Kasir-toko tidak boleh mengubah saldo lewat jalur ini sama sekali,
+  // baik bikin baru maupun batalkan; satu-satunya cara kasir-toko boleh mengubah saldo adalah
+  // lewat transaksi belanja (RPC belanja_toko). Pembatalan topup/tarik harus lewat Aplikasi Keuangan.
+  if(t.tipe==='topup' || t.tipe==='tarik'){
+    toast('Top Up & Tarik Tunai hanya bisa dibatalkan dari Aplikasi Keuangan');
+    return;
+  }
+  let pesan = `Batalkan transaksi penjualan ini? Stok produk akan dikembalikan${t.metode==='saldo' ? ` dan saldo ${t.anggotaNama||'anggota'} akan dikembalikan sebesar ${rupiah(t.total)}` : t.metode==='hutang' ? ` dan catatan hutang ${t.anggotaNama||'pembeli'} akan dihapus` : ''}.`;
   if(!confirm(pesan)) return;
 
   let catatanGagal = [];
-  if(t.tipe==='jual'){
-    t.items.forEach(i=>{
-      const p = state.produk.find(x=>x.id===i.produkId);
-      if(p) p.stok += i.qty*(i.pcsPerSatuan||1);
-      else catatanGagal.push(`stok "${i.nama}" (produk sudah dihapus)`);
-    });
-    if(t.metode==='saldo' && t.anggotaId){
-      const a = state.anggota.find(x=>x.id===t.anggotaId);
-      if(a) a.saldo += t.total;
-      else catatanGagal.push(`saldo anggota (sudah dihapus)`);
-    }
-  } else if(t.tipe==='topup'){
-    const a = state.anggota.find(x=>x.id===t.anggotaId);
-    if(a) a.saldo -= t.total;
-    else catatanGagal.push(`saldo anggota (sudah dihapus)`);
-  } else if(t.tipe==='tarik'){
+  t.items.forEach(i=>{
+    const p = state.produk.find(x=>x.id===i.produkId);
+    if(p) p.stok += i.qty*(i.pcsPerSatuan||1);
+    else catatanGagal.push(`stok "${i.nama}" (produk sudah dihapus)`);
+  });
+  if(t.metode==='saldo' && t.anggotaId){
     const a = state.anggota.find(x=>x.id===t.anggotaId);
     if(a) a.saldo += t.total;
     else catatanGagal.push(`saldo anggota (sudah dihapus)`);
@@ -2202,6 +2205,9 @@ function batalkanTransaksi(id){
   t.dibatalkan = true;
   t.dibatalkanPada = new Date().toISOString();
   saveDB();
+  // Kirim pembatalan ke server (RPC batalkan_transaksi_toko) supaya stok & saldo di database ikut
+  // dikembalikan, dan Aplikasi Keuangan/Wali Santri lihat data yang sama — bukan cuma berubah di HP ini.
+  tambahTiketAntrean('transaksi_batal', { clientId: t.clientId });
   toast(catatanGagal.length ? `Transaksi dibatalkan. Tidak bisa memulihkan: ${catatanGagal.join(', ')}` : 'Transaksi dibatalkan');
   renderTabelRiwayat();
   const wrap = document.getElementById('tabelAnggotaWrap');
@@ -2268,7 +2274,7 @@ function renderTabelRiwayat(){
       <td style="color:var(--muted);font-size:12.5px;">${(t.tipe==='topup'||t.tipe==='tarik') ? (t.catatan||'-') : t.items.map(i=>`${i.nama} ${labelItemQty(i)}`).join(', ')}</td>
       <td>${tagTipeTransaksi(t)}</td>
       <td class="num">${rupiah(t.total)}</td>
-      <td style="text-align:right;white-space:nowrap;">${t.dibatalkan ? '' : `${(t.metode==='hutang' && t.statusBayar==='belum_bayar') ? `<button class="btn btn-sm btn-primary" onclick="tandaiLunasHutang('${t.clientId||t.id}')">Tandai Lunas</button> ` : ''}<button class="btn btn-sm btn-danger" onclick="batalkanTransaksi('${t.clientId||t.id}')">Batalkan</button>`}</td>
+      <td style="text-align:right;white-space:nowrap;">${t.dibatalkan ? '' : `${(t.metode==='hutang' && t.statusBayar==='belum_bayar') ? `<button class="btn btn-sm btn-primary" onclick="tandaiLunasHutang('${t.clientId||t.id}')">Tandai Lunas</button> ` : ''}${t.tipe==='jual' ? `<button class="btn btn-sm btn-danger" onclick="batalkanTransaksi('${t.clientId||t.id}')">Batalkan</button>` : ''}`}</td>
     </tr>`).join('')}
   </tbody></table>`;
 }
