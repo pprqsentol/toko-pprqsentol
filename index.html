@@ -437,6 +437,7 @@ function labelTiket(tiket){
   if(tiket.tipe === 'kas_mutasi_hapus') return `Hapus catatan kas`;
   if(tiket.tipe === 'kas_awal_update') return `Update kas awal: ${rupiah(p.kasAwal||0)}`;
   if(tiket.tipe === 'transaksi_batal') return `Batalkan transaksi`;
+  if(tiket.tipe === 'transaksi_lunas') return `Tandai lunas hutang`;
   return tiket.tipe;
 }
 function perbaruiBadgeAntrean(){
@@ -647,6 +648,14 @@ async function prosesTiket(tiket){
     // ini giliran jalan, baris transaksi_toko-nya (dicari via client_id) sudah pasti ada di server.
     const { error } = await sb.rpc('batalkan_transaksi_toko', { p_client_id: tiket.payload.clientId });
     if(error) throw error;
+  } else if(tiket.tipe === 'transaksi_lunas'){
+    // lunaskan_transaksi_toko butuh id ASLI (uuid) dari server, bukan client_id — cari dulu baris
+    // aslinya lewat client_id (sama alasannya seperti transaksi_batal: urutan antrean FIFO menjamin
+    // tiket 'transaksi_toko' baris ini sudah terkirim lebih dulu, jadi client_id ini pasti sudah ada).
+    const { data: row, error: e1 } = await sb.from('transaksi_toko').select('id').eq('client_id', tiket.payload.clientId).single();
+    if(e1) throw e1;
+    const { error: e2 } = await sb.rpc('lunaskan_transaksi_toko', { p_id: row.id });
+    if(e2) throw e2;
   }
 }
 
@@ -789,7 +798,7 @@ function mapRingkasanDariSupabase(r){
   return {
     lokasi: r.lokasi, kasAwal: Number(r.kas_awal)||0, modalAwal: Number(r.modal_awal)||0,
     saldoKas: Number(r.saldo_kas)||0, nilaiStok: Number(r.nilai_stok)||0,
-    piutang: Number(r.piutang_belum_lunas)||0,
+    piutang: Number(r.piutang)||0,
     omzetKumulatif: Number(r.omzet_kumulatif)||0, modalTerjualKumulatif: Number(r.modal_terjual_kumulatif)||0,
     labaKumulatif: Number(r.laba_kumulatif)||0,
     biayaOperasionalKumulatif: Number(r.biaya_operasional_kumulatif)||0,
@@ -2172,6 +2181,7 @@ function tandaiLunasHutang(id){
   t.statusBayar = 'lunas';
   t.lunasPada = new Date().toISOString();
   saveDB();
+  tambahTiketAntrean('transaksi_lunas', { clientId: t.clientId });
   toast('Hutang ditandai lunas');
   if(document.getElementById('tabelRiwayatWrap')) renderTabelRiwayat();
   if(document.getElementById('labaCards')) renderLaporan();
