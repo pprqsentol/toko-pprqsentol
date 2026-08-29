@@ -138,16 +138,25 @@
   #grafikLaporan{display:block;}
   #grafikProdukLaporan{display:block;}
 
-  /* Kasir layout — 2 kolom, tinggi penuh sisa layar, masing-masing bagian scroll sendiri */
-  .kasir-wrap{display:grid;grid-template-columns:340px 1fr;gap:14px;min-height:0;}
-  .kasir-col{background:var(--surface);border:1px solid var(--border);border-radius:12px;display:flex;flex-direction:column;min-height:0;overflow:hidden;}
+  /* Kasir layout — 2 kolom sejajar (keranjang & produk), masing-masing scroll sendiri.
+     Total/Status/Bayar/Proses Transaksi dipisah jadi bar sendiri, melebar penuh, sticky di bawah. */
+  .kasir-wrap{display:grid;grid-template-columns:1fr 1fr;gap:14px;}
+  .kasir-col{background:var(--surface);border:1px solid var(--border);border-radius:12px;display:flex;flex-direction:column;overflow:hidden;max-height:62vh;}
   .kasir-col-fixed{flex:none;}
   .kasir-col-scroll{flex:1 1 auto;min-height:0;overflow-y:auto;-webkit-overflow-scrolling:touch;}
   .kasir-pembeli-blok{padding:14px 16px;border-bottom:1px solid var(--border);}
   .kasir-cart-head{padding:10px 16px;border-bottom:1px solid var(--border);font-size:12px;text-transform:uppercase;letter-spacing:.4px;color:var(--muted);font-weight:600;}
   .kasir-cart-list{padding:4px 16px;}
-  .kasir-bayar-blok{padding:14px 16px;border-top:1px solid var(--border);}
   .kasir-produk-search{padding:14px 16px;border-bottom:1px solid var(--border);}
+  .kasir-bayar-bar{position:sticky;bottom:0;margin-top:14px;background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:12px 16px;box-shadow:0 -6px 16px rgba(0,0,0,.08);z-index:5;}
+  .kasir-bayar-bar-row{display:flex;justify-content:space-between;align-items:flex-start;gap:16px;flex-wrap:wrap;}
+  .kasir-bayar-bar-total .cart-total{margin:0 0 8px;padding:0;border:none;font-size:17px;}
+  .kasir-bayar-bar-input{text-align:right;min-width:150px;}
+  .kasir-bayar-bar-input label{font-size:11px;color:var(--muted);display:block;margin-bottom:3px;}
+  .kasir-bayar-bar-input input{text-align:right;width:150px;}
+  .kasir-bayar-bar-sisa{font-size:12px;color:var(--muted);margin-top:6px;}
+  .kasir-bayar-bar-sisa span{color:var(--text);font-weight:600;}
+  .kasir-bayar-bar #btnProses{width:100%;padding:11px;font-size:14.5px;margin-top:12px;}
   .produk-list{display:flex;flex-direction:column;}
   .produk-row{display:flex;flex-wrap:wrap;align-items:center;gap:2px 10px;padding:10px 16px;border-bottom:1px solid var(--border);background:none;border-left:none;border-right:none;border-top:none;text-align:left;width:100%;transition:background .15s;}
   .produk-row:hover{background:var(--bg);}
@@ -223,18 +232,25 @@
     .nav button{white-space:nowrap;width:auto;}
     .sidebar-foot{display:none;}
     .main{padding:18px;}
-    .kasir-wrap{grid-template-columns:38% 1fr;gap:10px;}
-    .kasir-pembeli-blok,.kasir-bayar-blok,.kasir-produk-search{padding:10px 12px;}
+    .kasir-wrap{grid-template-columns:1fr 1fr;gap:10px;}
+    .kasir-col{max-height:48vh;}
+    .kasir-pembeli-blok,.kasir-produk-search{padding:10px 12px;}
     .kasir-cart-list{padding:4px 12px;}
     .produk-row{padding:9px 12px;}
+    .kasir-bayar-bar{padding:10px 12px;}
+    .kasir-bayar-bar-input,.kasir-bayar-bar-input input{width:100%;min-width:0;}
   }
   @media(max-width:480px){
-    .kasir-wrap{grid-template-columns:46% 1fr;gap:8px;}
+    .kasir-wrap{grid-template-columns:1fr 1fr;gap:8px;}
+    .kasir-col{max-height:40vh;}
     #btnScanProduk .lbl{display:none;}
     #btnScanProduk{padding:8px 10px;}
     .cart-total{font-size:15.5px;margin:10px 0;padding-top:9px;}
     .kategori-chips{gap:5px;}
     .chip-kategori{padding:6px 9px;font-size:11.5px;}
+    .kasir-bayar-bar-row{flex-direction:column;}
+    .kasir-bayar-bar-input{text-align:left;width:100%;}
+    .kasir-bayar-bar-input input{width:100%;}
   }
 </style>
 </head>
@@ -1956,29 +1972,6 @@ pages.kasir = function(){
         <div class="kasir-col-scroll">
           <div class="kasir-cart-list" id="cartItems"><div class="empty" style="padding:20px 0;">Keranjang kosong</div></div>
         </div>
-        <div class="kasir-col-fixed kasir-bayar-blok">
-          <div class="cart-total"><span>Total</span><span id="cartTotal">Rp0</span></div>
-          <div id="bayarBlok">
-            <div class="field" style="margin-top:8px;">
-              <label>Status Pembayaran</label>
-              <div class="kategori-chips">
-                <button type="button" class="chip-kategori active" id="chipLunas" onclick="pilihStatusBayar('lunas')">Lunas</button>
-                <button type="button" class="chip-kategori" id="chipBelumBayar" onclick="pilihStatusBayar('belum_bayar')">Belum Bayar (Hutang)</button>
-              </div>
-            </div>
-            <div id="blokLunas">
-              <div class="field" style="margin-top:8px;"><label>Bayar</label><input id="fBayar" type="text" inputmode="numeric" placeholder="0"></div>
-              <div class="cart-total" style="font-size:13.5px;"><span>Sisa / Kembali</span><span id="cartSisa">Rp0</span></div>
-            </div>
-            <div id="blokHutang" style="display:none;">
-              <div class="field" style="margin-top:8px;">
-                <label>Nama Pembeli (bukti hutang)</label>
-                <input id="fNamaHutang" type="text" placeholder="Nama pembeli yang berhutang">
-              </div>
-            </div>
-          </div>
-          <button class="btn btn-accent" style="width:100%;padding:11px;font-size:14.5px;" id="btnProses" disabled>Proses Transaksi</button>
-        </div>
       </div>
       <div class="kasir-col">
         <div class="kasir-col-fixed kasir-produk-search">
@@ -1992,31 +1985,37 @@ pages.kasir = function(){
         </div>
       </div>
     </div>
+    <div class="kasir-bayar-bar" id="kasirBayarBar">
+      <div class="kasir-bayar-bar-row">
+        <div class="kasir-bayar-bar-total">
+          <div class="cart-total"><span>Total</span><span id="cartTotal">Rp0</span></div>
+          <div class="field" style="margin:8px 0 0;">
+            <label>Status Pembayaran</label>
+            <div class="kategori-chips">
+              <button type="button" class="chip-kategori active" id="chipLunas" onclick="pilihStatusBayar('lunas')">Lunas</button>
+              <button type="button" class="chip-kategori" id="chipBelumBayar" onclick="pilihStatusBayar('belum_bayar')">Belum Bayar (Hutang)</button>
+            </div>
+          </div>
+        </div>
+        <div class="kasir-bayar-bar-input" id="bayarBlok">
+          <div id="blokLunas">
+            <label>Bayar</label>
+            <input id="fBayar" type="text" inputmode="numeric" placeholder="0">
+            <div class="kasir-bayar-bar-sisa">Sisa / Kembali <span id="cartSisa">Rp0</span></div>
+          </div>
+          <div id="blokHutang" style="display:none;">
+            <label>Nama Pembeli (bukti hutang)</label>
+            <input id="fNamaHutang" type="text" placeholder="Nama pembeli yang berhutang">
+          </div>
+        </div>
+      </div>
+      <button class="btn btn-accent" id="btnProses" disabled>Proses Transaksi</button>
+    </div>
   `;
 };
-// Menyetel tinggi kolom kasir supaya pas mengisi sisa layar (di bawah topbar/sidebar),
-// sehingga bagian atas (pembeli) & bawah (total/bayar) stuck, dan tengah/kanan scroll sendiri.
-// Kalau tinggi layar terlalu pendek (mis. HP landscape / keyboard virtual muncul) untuk
-// menampung semua bagian tetap + sedikit baris keranjang, jangan dipaksa muat — biarkan
-// wrap lebih tinggi dari layar (halaman jadi bisa discroll) supaya Keranjang & tombol
-// Proses Transaksi tidak pernah hilang/ketutup sama sekali.
-function sesuaikanTinggiKasir(){
-  const wrap = document.getElementById('kasirWrap');
-  if(!wrap) return;
-  const pembeliBlok = wrap.querySelector('.kasir-pembeli-blok');
-  const cartHead = wrap.querySelector('.kasir-cart-head');
-  const bayarBlok = wrap.querySelector('.kasir-bayar-blok');
-  const produkSearch = wrap.querySelector('.kasir-produk-search');
-  const MIN_CART_LIST = 90;   // minimal separuh-baris keranjang tetap kelihatan
-  const MIN_PRODUK_LIST = 70; // minimal beberapa baris produk tetap kelihatan
-  const tinggiTetapKiri = (pembeliBlok?pembeliBlok.offsetHeight:0) + (cartHead?cartHead.offsetHeight:0) + (bayarBlok?bayarBlok.offsetHeight:0);
-  const tinggiTetapKanan = produkSearch ? produkSearch.offsetHeight : 0;
-  const minButuh = Math.max(tinggiTetapKiri + MIN_CART_LIST, tinggiTetapKanan + MIN_PRODUK_LIST, 260);
-  const top = wrap.getBoundingClientRect().top;
-  const vh = window.visualViewport ? window.visualViewport.height : window.innerHeight;
-  const tersedia = vh - top - 20;
-  wrap.style.height = Math.max(tersedia, minButuh) + 'px';
-}
+// Tinggi kolom Kasir sekarang murni CSS (.kasir-col{max-height:...vh}) dan bar
+// Total/Bayar/Proses Transaksi memakai position:sticky di bawah — jadi tidak perlu
+// lagi dihitung manual pakai JS di sini.
 function renderProdukGrid(filter){
   filter = (filter||'').toLowerCase();
   const grid = document.getElementById('produkGrid');
@@ -2145,7 +2144,6 @@ function pilihPembeli(id){
   document.getElementById('cariPembeli').value = a.nama;
   info.innerHTML = `<p style="font-size:12.5px;color:var(--muted);margin:6px 0 12px;">Saldo: <strong style="color:var(--primary-dark)">${rupiah(a.saldo)}</strong></p>`;
   if(bayarBlok) bayarBlok.style.display = 'none';
-  sesuaikanTinggiKasir();
 }
 function pilihStatusBayar(status){
   statusBayarKasir = status;
@@ -2159,7 +2157,6 @@ function pilihStatusBayar(status){
   if(blokLunas) blokLunas.style.display = status==='lunas' ? '' : 'none';
   if(blokHutang) blokHutang.style.display = status==='belum_bayar' ? '' : 'none';
   updateSisaKasir();
-  sesuaikanTinggiKasir();
 }
 function updateSisaKasir(){
   const sisaEl = document.getElementById('cartSisa');
@@ -3103,13 +3100,6 @@ function attachPageEvents(name){
     renderCart();
     pilihPembeli(null);
     setTimeout(focusScanKasir, 50);
-    sesuaikanTinggiKasir();
-    window.removeEventListener('resize', sesuaikanTinggiKasir);
-    window.addEventListener('resize', sesuaikanTinggiKasir);
-    if(window.visualViewport){
-      window.visualViewport.removeEventListener('resize', sesuaikanTinggiKasir);
-      window.visualViewport.addEventListener('resize', sesuaikanTinggiKasir);
-    }
     document.getElementById('cariProdukKasir').addEventListener('input', e=>{
       const q = e.target.value.trim();
       const barcodeMatch = state.produk.find(p=>p.barcode && p.barcode===q);
