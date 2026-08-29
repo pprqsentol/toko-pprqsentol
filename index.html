@@ -146,12 +146,14 @@
   .kasir-pembeli-blok{padding:14px 16px;border-bottom:1px solid var(--border);}
   .kasir-cart-head{padding:10px 16px;border-bottom:1px solid var(--border);font-size:12px;text-transform:uppercase;letter-spacing:.4px;color:var(--muted);font-weight:600;}
   .kasir-cart-list{padding:4px 16px;}
-  /* Stuck (fixed) di paling bawah LAYAR di semua perangkat — bukan cuma bawah kolom —
-     supaya Total, status Lunas/Hutang & tombol Proses Transaksi selalu kelihatan tanpa
-     scroll, termasuk saat address bar HP muncul/hilang. left & width disetel via JS
-     (sesuaikanTinggiKasir) supaya persis pas dengan lebar kolom kiri. */
-  .kasir-bayar-blok{padding:14px 16px;border-top:1px solid var(--border);position:fixed;bottom:0;z-index:20;background:var(--surface);border-radius:0 0 12px 12px;box-shadow:0 -8px 20px rgba(0,0,0,.10);}
-  .cart-total-row{display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap;margin:14px 0;padding-top:12px;border-top:2px solid var(--primary-dark);}
+  /* Bar Total & pembayaran, memanjang PENUH kiri-ke-kanan (di bawah kedua kolom),
+     stuck (fixed) di paling bawah LAYAR di semua perangkat — bukan cuma di satu
+     kolom — supaya Total, status Lunas/Hutang & tombol Proses Transaksi selalu
+     kelihatan tanpa scroll, termasuk saat address bar HP muncul/hilang. left,
+     width & tinggi kolom di atasnya disetel via JS (sesuaikanTinggiKasir) supaya
+     persis selebar area kasir (kolom kiri + kolom kanan). */
+  .kasir-total-bar{padding:12px 16px;border:1px solid var(--border);border-bottom:none;position:fixed;bottom:0;z-index:20;background:var(--surface);border-radius:12px 12px 0 0;box-shadow:0 -8px 20px rgba(0,0,0,.10);}
+  .cart-total-row{display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap;margin:0 0 10px;}
   .cart-total-row .cart-total{margin:0;padding-top:0;border-top:none;flex:1 1 auto;min-width:110px;}
   .chips-bayar{flex:0 0 auto;}
   .kasir-produk-search{padding:14px 16px;border-bottom:1px solid var(--border);}
@@ -231,7 +233,8 @@
     .sidebar-foot{display:none;}
     .main{padding:18px;}
     .kasir-wrap{grid-template-columns:38% 1fr;gap:10px;}
-    .kasir-pembeli-blok,.kasir-bayar-blok,.kasir-produk-search{padding:10px 12px;}
+    .kasir-pembeli-blok,.kasir-produk-search{padding:10px 12px;}
+    .kasir-total-bar{padding:10px 12px;}
     .kasir-cart-list{padding:4px 12px;}
     .produk-row{padding:9px 12px;}
   }
@@ -239,8 +242,8 @@
     .kasir-wrap{grid-template-columns:46% 1fr;gap:8px;}
     #btnScanProduk .lbl{display:none;}
     #btnScanProduk{padding:8px 10px;}
-    .cart-total{font-size:15.5px;margin:10px 0;padding-top:9px;}
-    .cart-total-row{margin:10px 0;padding-top:9px;}
+    .cart-total{font-size:15.5px;margin:0;}
+    .cart-total-row{margin:0 0 8px;}
     .kategori-chips{gap:5px;}
     .chip-kategori{padding:6px 9px;font-size:11.5px;}
   }
@@ -1964,28 +1967,6 @@ pages.kasir = function(){
         <div class="kasir-col-scroll">
           <div class="kasir-cart-list" id="cartItems"><div class="empty" style="padding:20px 0;">Keranjang kosong</div></div>
         </div>
-        <div class="kasir-col-fixed kasir-bayar-blok">
-          <div class="cart-total-row">
-            <div class="cart-total"><span>Total</span><span id="cartTotal">Rp0</span></div>
-            <div class="kategori-chips chips-bayar" id="statusBayarChips">
-              <button type="button" class="chip-kategori active" id="chipLunas" onclick="pilihStatusBayar('lunas')">Lunas</button>
-              <button type="button" class="chip-kategori" id="chipBelumBayar" onclick="pilihStatusBayar('belum_bayar')">Hutang</button>
-            </div>
-          </div>
-          <div id="bayarBlok">
-            <div id="blokLunas">
-              <div class="field" style="margin-top:8px;"><label>Bayar</label><input id="fBayar" type="text" inputmode="numeric" placeholder="0"></div>
-              <div class="cart-total" style="font-size:13.5px;"><span>Sisa / Kembali</span><span id="cartSisa">Rp0</span></div>
-            </div>
-            <div id="blokHutang" style="display:none;">
-              <div class="field" style="margin-top:8px;">
-                <label>Nama Pembeli (bukti hutang)</label>
-                <input id="fNamaHutang" type="text" placeholder="Nama pembeli yang berhutang">
-              </div>
-            </div>
-          </div>
-          <button class="btn btn-accent" style="width:100%;padding:11px;font-size:14.5px;" id="btnProses" disabled>Proses Transaksi</button>
-        </div>
       </div>
       <div class="kasir-col">
         <div class="kasir-col-fixed kasir-produk-search">
@@ -1999,6 +1980,28 @@ pages.kasir = function(){
         </div>
       </div>
     </div>
+    <div class="kasir-total-bar" id="kasirTotalBar">
+      <div class="cart-total-row">
+        <div class="cart-total"><span>Total</span><span id="cartTotal">Rp0</span></div>
+        <div class="kategori-chips chips-bayar" id="statusBayarChips">
+          <button type="button" class="chip-kategori active" id="chipLunas" onclick="pilihStatusBayar('lunas')">Lunas</button>
+          <button type="button" class="chip-kategori" id="chipBelumBayar" onclick="pilihStatusBayar('belum_bayar')">Hutang</button>
+        </div>
+      </div>
+      <div id="bayarBlok">
+        <div id="blokLunas">
+          <div class="field" style="margin-top:8px;"><label>Bayar</label><input id="fBayar" type="text" inputmode="numeric" placeholder="0"></div>
+          <div class="cart-total" style="font-size:13.5px;"><span>Sisa / Kembali</span><span id="cartSisa">Rp0</span></div>
+        </div>
+        <div id="blokHutang" style="display:none;">
+          <div class="field" style="margin-top:8px;">
+            <label>Nama Pembeli (bukti hutang)</label>
+            <input id="fNamaHutang" type="text" placeholder="Nama pembeli yang berhutang">
+          </div>
+        </div>
+      </div>
+      <button class="btn btn-accent" style="width:100%;padding:11px;font-size:14.5px;" id="btnProses" disabled>Proses Transaksi</button>
+    </div>
   `;
 };
 // Menyetel tinggi kolom kasir supaya pas mengisi sisa layar (di bawah topbar/sidebar),
@@ -2009,33 +2012,33 @@ pages.kasir = function(){
 // Proses Transaksi tidak pernah hilang/ketutup sama sekali.
 function sesuaikanTinggiKasir(){
   const wrap = document.getElementById('kasirWrap');
+  const totalBar = document.getElementById('kasirTotalBar');
   if(!wrap) return;
-  const kolomKiri = wrap.querySelector('.kasir-col');
+  // Set dulu left & width bar Total (posisinya tidak tergantung tinggi wrap) —
+  // memanjang PENUH dari kolom keranjang sampai kolom produk, biar tinggi bar
+  // terukur pas dengan lebar yang benar sebelum dipakai menghitung sisa ruang di atasnya.
+  // Bar-nya sendiri position:fixed di CSS supaya benar-benar stuck di paling bawah
+  // LAYAR (bukan cuma satu kolom) di semua perangkat.
+  if(totalBar){
+    const rectWrap = wrap.getBoundingClientRect();
+    totalBar.style.left = rectWrap.left + 'px';
+    totalBar.style.width = rectWrap.width + 'px';
+  }
   const pembeliBlok = wrap.querySelector('.kasir-pembeli-blok');
   const cartHead = wrap.querySelector('.kasir-cart-head');
-  const scrollKiri = wrap.querySelector('.kasir-col-scroll');
-  const bayarBlok = wrap.querySelector('.kasir-bayar-blok');
   const produkSearch = wrap.querySelector('.kasir-produk-search');
   const MIN_CART_LIST = 90;   // minimal separuh-baris keranjang tetap kelihatan
   const MIN_PRODUK_LIST = 70; // minimal beberapa baris produk tetap kelihatan
-  const tinggiTetapKiri = (pembeliBlok?pembeliBlok.offsetHeight:0) + (cartHead?cartHead.offsetHeight:0) + (bayarBlok?bayarBlok.offsetHeight:0);
+  const tinggiBar = totalBar ? totalBar.offsetHeight : 0;
+  const tinggiTetapKiri = (pembeliBlok?pembeliBlok.offsetHeight:0) + (cartHead?cartHead.offsetHeight:0);
   const tinggiTetapKanan = produkSearch ? produkSearch.offsetHeight : 0;
-  const minButuh = Math.max(tinggiTetapKiri + MIN_CART_LIST, tinggiTetapKanan + MIN_PRODUK_LIST, 260);
+  const minButuh = Math.max(tinggiTetapKiri + MIN_CART_LIST, tinggiTetapKanan + MIN_PRODUK_LIST, 200);
   const top = wrap.getBoundingClientRect().top;
   const vh = window.visualViewport ? window.visualViewport.height : window.innerHeight;
-  const tersedia = vh - top - 20;
+  // Sisakan ruang persis setinggi bar Total di bawah, supaya kolom keranjang & produk
+  // berhenti tepat di atas bar, bukan ketutupan olehnya.
+  const tersedia = vh - top - 20 - tinggiBar;
   wrap.style.height = Math.max(tersedia, minButuh) + 'px';
-
-  // Bagian Total/status/tombol Proses Transaksi dibuat position:fixed di CSS supaya
-  // benar-benar stuck di paling bawah LAYAR (bukan cuma bawah kolom) di semua perangkat.
-  // left & width-nya disamakan dengan kolom kiri di sini, dan daftar keranjang diberi
-  // padding-bottom setinggi bagian ini supaya baris terakhir tidak ketutupan.
-  if(kolomKiri && bayarBlok){
-    const rectKiri = kolomKiri.getBoundingClientRect();
-    bayarBlok.style.left = rectKiri.left + 'px';
-    bayarBlok.style.width = rectKiri.width + 'px';
-    if(scrollKiri) scrollKiri.style.paddingBottom = bayarBlok.offsetHeight + 'px';
-  }
 }
 function renderProdukGrid(filter){
   filter = (filter||'').toLowerCase();
