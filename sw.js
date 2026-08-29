@@ -1,4 +1,4 @@
-const CACHE_NAME = 'kasir-toko-v41-fix-kas-setelah-login';
+const CACHE_NAME = 'kasir-toko-v42-kasir-bar-bawah';
 const ASSETS = [
   './',
   './index.html',
