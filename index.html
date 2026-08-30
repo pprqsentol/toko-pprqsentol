@@ -754,18 +754,20 @@ async function muatKasDariSupabase(){
    transaksi toko bisa ditarik ulang dari server, bukan cuma mengandalkan IndexedDB lokal yang hilang;
    (2) jadi "sumber kebenaran" untuk Kas & Dashboard (lihat daftarTransaksiToko) supaya konsisten
    dengan data yang dilihat aplikasi lain (mis. panel Laporan Toko di Aplikasi Pondok).
-   Ditarik header (transaksi_toko) & item (transaksi_toko_item) terpisah lalu digabung manual di JS
-   (bukan nested select PostgREST) supaya tidak tergantung nama relasi foreign key di server. */
-function mapTransaksiTokoDariSupabase(r, items){
+   PENTING: tabel transaksi_toko TIDAK punya tabel item terpisah — rincian barang disimpan langsung
+   di kolom items (jsonb) pada baris yang sama, dan kolom tanggalnya bernama created_at (bukan
+   "tanggal"), serta tidak ada kolom santri_nama (nama santri didapat lewat join ke tabel santri
+   kalau santri_id terisi; kalau tidak, pakai catatan — dipakai untuk pembeli non-santri). */
+function mapTransaksiTokoDariSupabase(r){
   return {
-    id: r.id, clientId: r.client_id || null, tipe:'jual', tanggal: r.tanggal, lokasi: r.lokasi,
-    anggotaId: r.santri_id || null, anggotaNama: r.santri_nama || r.catatan || null,
+    id: r.id, clientId: r.client_id || null, tipe:'jual', tanggal: r.created_at, lokasi: r.lokasi,
+    anggotaId: r.santri_id || null, anggotaNama: (r.santri && r.santri.nama) || r.catatan || null,
     metode: r.metode==='Saldo' ? 'saldo' : r.metode==='Hutang' ? 'hutang' : 'tunai',
     statusBayar: r.status_bayar || (r.metode==='Hutang' ? 'belum_bayar' : 'lunas'),
     total: Number(r.total)||0,
     dibatalkan: !!r.dibatalkan, dibatalkanPada: r.dibatalkan_pada || null, lunasPada: r.lunas_pada || null,
     catatan: r.catatan || null, dicatatOleh: r.dicatat_oleh || null,
-    items: (items||[]).map(it=>({
+    items: (r.items||[]).map(it=>({
       produkId: it.produk_id, nama: it.nama_produk, harga: Number(it.harga_jual)||0,
       hargaBeli: Number(it.harga_beli)||0, qty: Number(it.qty)||0
     })),
@@ -777,31 +779,25 @@ async function tarikTransaksiTokoDariSupabase(){
   if(antrean.length > 0) return false; // sama seperti data lain: jangan timpa cache selama masih ada tiket yang menunggu dikirim
   try{
     const { data: headerRows, error: errHeader } = await sb.from('transaksi_toko')
-      .select('*').eq('lokasi', lokasiToko).order('tanggal', { ascending:false }).limit(3000);
+      .select('*, santri:santri_id(nama)').eq('lokasi', lokasiToko).order('created_at', { ascending:false }).limit(3000);
     if(errHeader){ console.error('Gagal menarik riwayat transaksi_toko', errHeader); return false; }
-    const idHeader = (headerRows||[]).map(r=>r.id);
-    let itemRows = [];
-    if(idHeader.length){
-      const { data: itemData, error: errItem } = await sb.from('transaksi_toko_item').select('*').in('transaksi_id', idHeader);
-      if(errItem){ console.error('Gagal menarik item transaksi_toko', errItem); return false; }
-      itemRows = itemData || [];
-    }
-    const itemMap = {};
-    itemRows.forEach(it=>{ (itemMap[it.transaksi_id] = itemMap[it.transaksi_id] || []).push(it); });
-    state.transaksiTokoCache = (headerRows||[]).map(r=>mapTransaksiTokoDariSupabase(r, itemMap[r.id]));
+    state.transaksiTokoCache = (headerRows||[]).map(mapTransaksiTokoDariSupabase);
     saveDB();
     return true;
   }catch(e){ console.error('Gagal menarik riwayat transaksi_toko', e); return false; }
 }
 
 /* ============ SINKRON v_transaksi_item (RINCIAN PER PRODUK TERJUAL) ============
-   View ini sudah menggabungkan transaksi_toko + transaksi_toko_item di server, dipakai khusus
-   untuk Laporan (rincian laba per produk, produk terlaris, grafik) supaya angkanya pasti sama
-   dengan yang dihitung aplikasi lain yang membaca view yang sama — bukan dihitung ulang di JS. */
+   View ini sudah memekarkan kolom items (jsonb) di transaksi_toko jadi satu baris per produk,
+   dipakai khusus untuk Laporan (rincian laba per produk, produk terlaris, grafik) supaya angkanya
+   pasti sama dengan yang dihitung aplikasi lain yang membaca view yang sama — bukan dihitung ulang di JS. */
 function mapTransaksiItemDariSupabase(r){
   return {
+    // v_transaksi_item tidak punya kolom client_id, jadi transaksiClientId selalu null di sini —
+    // itu tidak masalah karena view ini cuma dipakai untuk rincian laba per produk (bukan untuk
+    // mencocokkan status batal/lunas terbaru, itu tugas daftarTransaksiToko/transaksiTokoCache).
     transaksiId: r.transaksi_id, transaksiClientId: r.client_id || null,
-    tanggal: r.tanggal, lokasi: r.lokasi,
+    tanggal: r.created_at, lokasi: r.lokasi,
     metode: r.metode==='Saldo' ? 'saldo' : r.metode==='Hutang' ? 'hutang' : 'tunai',
     statusBayar: r.status_bayar, dibatalkan: !!r.dibatalkan,
     produkId: r.produk_id, namaProduk: r.nama_produk,
@@ -2373,7 +2369,13 @@ pages.riwayat = function(){
 function renderTabelRiwayat(){
   const tgl = document.getElementById('filterTanggal')?.value;
   const tipe = document.getElementById('filterTipe')?.value;
-  let list = [...state.transaksi].reverse();
+  // Pakai daftarTransaksiToko() (cache dari server digabung transaksi lokal yang belum tersinkron)
+  // untuk transaksi 'jual', bukan cuma state.transaksi — supaya transaksi hutang yang dibuat sebelum
+  // data lokal HP ini pernah hilang/direset (tapi tetap ada di server) tetap tampil & bisa ditandai lunas.
+  // Top up & tarik tunai saldo murni lokal (tidak disimpan di tabel transaksi_toko), jadi tetap dari state.transaksi.
+  const nonJual = state.transaksi.filter(t=>t.tipe!=='jual');
+  let list = [...daftarTransaksiToko(), ...nonJual].sort((a,b)=> new Date(a.tanggal) - new Date(b.tanggal));
+  list.reverse();
   if(tgl) list = list.filter(t=>tanggalLokal(new Date(t.tanggal))===tgl);
   if(tipe) list = list.filter(t=>t.tipe===tipe);
   const wrap = document.getElementById('tabelRiwayatWrap');
@@ -2725,8 +2727,12 @@ function hitungLaporan(dari, sampai){
   // transaksi_toko digabung transaksi lokal yang belum tersinkron) supaya tombol "Tandai Lunas" tetap jalan.
   const listTrx = daftarTransaksiToko().filter(t=>t.tipe==='jual' && !t.dibatalkan && tanggalLokal(new Date(t.tanggal))>=dari && tanggalLokal(new Date(t.tanggal))<=sampai);
   const listHutang = listTrx.filter(t=>t.metode==='hutang');
-  const hutangBelumLunas = [...listHutang.filter(t=>t.statusBayar==='belum_bayar')].reverse();
   const hutangLunas = listHutang.filter(t=>t.statusBayar==='lunas');
+  // Piutang belum lunas sengaja TIDAK dibatasi rentang tanggal laporan (dari/sampai) — piutang adalah
+  // saldo berjalan yang menumpuk sampai dibayar, bukan angka per-periode. Kalau dibatasi tanggal, hutang
+  // dari hari-hari sebelumnya jadi "hilang" dari panel ini walau belum lunas & tombol Tandai Lunas jadi
+  // tidak bisa diakses dari Laporan untuk transaksi lama.
+  const hutangBelumLunas = [...daftarTransaksiToko().filter(t=>t.tipe==='jual' && !t.dibatalkan && t.metode==='hutang' && t.statusBayar==='belum_bayar')].reverse();
   const totalHutangBelumLunas = hutangBelumLunas.reduce((s,t)=>s+t.total,0);
   const labaTunai = omzetTunai - modalTunai;
   const labaKredit = omzetKredit - modalKredit;
@@ -2887,7 +2893,7 @@ function renderLaporan(){
   const wrapHutang = document.getElementById('hutangTabelWrap');
   if(wrapHutang){
     if(!r.hutangBelumLunas.length){
-      wrapHutang.innerHTML = `<div class="empty">Tidak ada pembelian belum bayar pada rentang tanggal ini.</div>`;
+      wrapHutang.innerHTML = `<div class="empty">Tidak ada pembelian yang belum dibayar.</div>`;
     } else {
       wrapHutang.innerHTML = `<table><thead><tr><th>Tanggal</th><th>Nama Pembeli</th><th>Detail</th><th class="num">Total</th><th></th></tr></thead><tbody>
         ${r.hutangBelumLunas.map(t=>`<tr>
