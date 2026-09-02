@@ -1,4 +1,4 @@
-const CACHE_NAME = 'kasir-toko-v44-kembalikan-tab-pengaturan';
+const CACHE_NAME = 'kasir-toko-v45-tombol-kembali-hp';
 const ASSETS = [
   './',
   './index.html',

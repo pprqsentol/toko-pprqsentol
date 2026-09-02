@@ -1151,20 +1151,36 @@ function goPage(name){
   renderPage(name);
 }
 function renderPage(name){
+  const halamanSebelumnya = document.querySelector('.nav button.active')?.dataset.page;
   document.querySelectorAll('.nav button').forEach(b=>b.classList.toggle('active', b.dataset.page===name));
   document.getElementById('main').innerHTML = pages[name]();
   attachPageEvents(name);
   window.scrollTo(0,0);
+  // ==== Riwayat browser utk tombol kembali HP (lihat blok BACK BUTTON di bawah) ====
+  // Cuma dicatat kalau ini benar-benar pindah halaman (bukan render ulang halaman yg sama),
+  // dan bukan hasil reaksi dari popstate (tombol kembali) itu sendiri — supaya tidak dobel.
+  if(!sedangProsesTombolKembali && halamanSebelumnya && halamanSebelumnya !== name){
+    if(name === 'dashboard'){
+      if(history.state && history.state.layer === 'tab') history.back();
+      else history.replaceState({layer:'dashboard'}, '');
+    } else if(!history.state || history.state.layer !== 'tab'){
+      history.pushState({layer:'tab'}, '');
+    }
+    // kalau sudah di layer 'tab' dan pindah antar tab lain (mis. Kasir -> Produk),
+    // tidak perlu push baru — kembali dari tab manapun tetap langsung ke Dashboard.
+  }
 }
 
 /* ============ MODAL HELPERS (form/dialog utama) ============ */
 function openModal(html){
   document.getElementById('modal').innerHTML = html;
   document.getElementById('overlay').classList.add('show');
+  if(!sedangProsesTombolKembali) history.pushState({layer:'modal'}, '');
 }
 function closeModal(){
   document.getElementById('overlay').classList.remove('show');
   document.getElementById('modal').innerHTML = '';
+  if(!sedangProsesTombolKembali && history.state && history.state.layer === 'modal') history.back();
 }
 document.getElementById('overlay').addEventListener('click', e=>{
   if(e.target.id === 'overlay') closeModal();
@@ -1174,15 +1190,50 @@ document.getElementById('overlay').addEventListener('click', e=>{
 function openScanModal(html){
   document.getElementById('scanModal').innerHTML = html;
   document.getElementById('scanOverlay').classList.add('show');
+  if(!sedangProsesTombolKembali) history.pushState({layer:'scan'}, '');
 }
 function closeScanModal(){
   if(scanRAF){ cancelAnimationFrame(scanRAF); scanRAF = null; }
   if(scanStream){ scanStream.getTracks().forEach(t=>t.stop()); scanStream = null; }
   document.getElementById('scanOverlay').classList.remove('show');
   document.getElementById('scanModal').innerHTML = '';
+  if(!sedangProsesTombolKembali && history.state && history.state.layer === 'scan') history.back();
 }
 document.getElementById('scanOverlay').addEventListener('click', e=>{
   if(e.target.id === 'scanOverlay') closeScanModal();
+});
+
+/* ============ TOMBOL KEMBALI HP (hardware/gesture back) ============
+   Tanpa ini, browser/WebView tidak punya riwayat internal utk di-"pop", jadi tombol
+   kembali langsung menutup aplikasi dari halaman manapun. Urutan yg dibuat di sini:
+     1) Kalau scanner kamera sedang terbuka -> tutup scanner saja.
+     2) Kalau tidak, kalau modal/dialog sedang terbuka -> tutup modal saja.
+     3) Kalau tidak, kalau sedang di tab selain Dashboard -> pindah ke Dashboard.
+     4) Kalau sudah di Dashboard tanpa apa pun terbuka -> biarkan browser keluar dari aplikasi.
+   Setiap kali membuka modal/scan/tab, satu entri riwayat ditambahkan (lihat fungsi open*
+   & renderPage di atas); setiap kali ditutup lewat tombol UI (bukan tombol kembali),
+   entri itu ikut "dikonsumsi" lewat history.back() supaya riwayat tidak menumpuk. */
+let sedangProsesTombolKembali = false;
+history.replaceState({layer:'dashboard'}, '');
+window.addEventListener('popstate', ()=>{
+  sedangProsesTombolKembali = true;
+  try{
+    if(document.getElementById('scanOverlay').classList.contains('show')){
+      closeScanModal();
+    } else if(document.getElementById('overlay').classList.contains('show')){
+      closeModal();
+    } else {
+      const halamanAktif = document.querySelector('.nav button.active')?.dataset.page;
+      if(halamanAktif && halamanAktif !== 'dashboard'){
+        renderPage('dashboard');
+      }
+      // Kalau sudah di dashboard & tidak ada apa pun terbuka: tidak ada lagi yg perlu
+      // ditutup di dalam aplikasi, jadi biarkan (browser/WebView akan keluar aplikasi
+      // di tekanan tombol kembali berikutnya, karena riwayat sudah habis).
+    }
+  } finally {
+    sedangProsesTombolKembali = false;
+  }
 });
 
 /* ============ SCAN KAMERA — pakai BarcodeDetector bawaan Chrome, tanpa library luar ============ */
