@@ -2550,6 +2550,13 @@ pages.kas = function(){
     </div>
     <div class="row-between" style="margin-top:14px;">
       <div class="filters">
+        <select class="search" id="kasPreset" onchange="terapkanPresetKas()">
+          <option value="custom">Kustom</option>
+          <option value="harian">Harian (Hari Ini)</option>
+          <option value="mingguan">Pekan Ini</option>
+          <option value="bulanan">Bulan Ini</option>
+          <option value="tahunan">Tahun Ini</option>
+        </select>
         <input type="date" class="search" id="kasDari" value="${today}">
         <span style="align-self:center;color:var(--muted);font-size:13px;">s/d</span>
         <input type="date" class="search" id="kasSampai" value="${today}">
@@ -2562,11 +2569,31 @@ pages.kas = function(){
       <div class="panel-body" id="cekModalWrap"></div>
     </div>
     <div class="panel">
-      <div class="panel-head">Mutasi Kas</div>
+      <div class="panel-head">
+        <span>Mutasi Kas</span>
+        <select class="search" id="kasArahFilter" style="width:auto;">
+          <option value="semua">Semua</option>
+          <option value="masuk">Masuk</option>
+          <option value="keluar">Keluar</option>
+        </select>
+      </div>
       <div class="panel-body" id="kasMutasiWrap"></div>
     </div>
   `;
 };
+function terapkanPresetKas(){
+  const preset = document.getElementById('kasPreset').value;
+  if(preset==='custom') return;
+  const today = todayISO();
+  let dari, sampai;
+  if(preset==='harian'){ dari = today; sampai = today; }
+  else if(preset==='mingguan'){ ({dari, sampai} = rangeMinggu(today)); }
+  else if(preset==='bulanan'){ ({dari, sampai} = rangeBulan(today.slice(0,7))); }
+  else { ({dari, sampai} = rangeTahun(today)); }
+  document.getElementById('kasDari').value = dari;
+  document.getElementById('kasSampai').value = sampai;
+  renderKas();
+}
 function hitungNilaiStokSaatIni(){
   return state.produk.reduce((s,p)=>s+(p.hargaBeli||0)*p.stok,0);
 }
@@ -2639,7 +2666,9 @@ function renderKas(){
     <div class="card accent"><div class="label">Selisih (periode)</div><div class="value">${rupiah(totalMasuk-totalKeluar)}</div></div>
   `;
   const wrap = document.getElementById('kasMutasiWrap');
-  const list = [...semua].reverse();
+  const arahFilter = document.getElementById('kasArahFilter') ? document.getElementById('kasArahFilter').value : 'semua';
+  const terfilter = arahFilter==='semua' ? semua : semua.filter(m=>m.arah===arahFilter);
+  const list = [...terfilter].reverse();
   if(!list.length){ wrap.innerHTML = `<div class="empty">Tidak ada mutasi kas pada rentang tanggal ini.</div>`; return; }
   wrap.innerHTML = `<table><thead><tr><th>Waktu</th><th>Uraian</th><th class="num">Masuk</th><th class="num">Keluar</th><th></th></tr></thead><tbody>
     ${list.map(m=>`<tr>
@@ -3289,6 +3318,10 @@ function attachPageEvents(name){
     document.getElementById('btnTerapkanKas').addEventListener('click', renderKas);
     document.getElementById('btnKasMasuk').addEventListener('click', openKasMasuk);
     document.getElementById('btnKasKeluar').addEventListener('click', openKasKeluar);
+    document.getElementById('kasArahFilter').addEventListener('change', renderKas);
+    const resetKePresetKas = ()=>{ const p = document.getElementById('kasPreset'); if(p) p.value = 'custom'; };
+    document.getElementById('kasDari').addEventListener('input', resetKePresetKas);
+    document.getElementById('kasSampai').addEventListener('input', resetKePresetKas);
   }
   if(name==='laporan'){
     renderLaporan();
