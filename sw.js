@@ -1,4 +1,4 @@
-const CACHE_NAME = 'kasir-toko-v45-tombol-kembali-hp';
+const CACHE_NAME = 'kasir-toko-v46-scan-history-fix';
 const ASSETS = [
   './',
   './index.html',

@@ -1180,7 +1180,13 @@ function openModal(html){
 function closeModal(){
   document.getElementById('overlay').classList.remove('show');
   document.getElementById('modal').innerHTML = '';
-  if(!sedangProsesTombolKembali && history.state && history.state.layer === 'modal') history.back();
+  if(!sedangProsesTombolKembali && history.state && history.state.layer === 'modal'){
+    // Penutupan ini dipicu dari kode (tombol/aksi), bukan tombol kembali HP.
+    // Tandai dulu supaya popstate yg muncul akibat history.back() di bawah ini
+    // cuma dikonsumsi diam-diam, tidak ikut menutup lapisan lain di baliknya.
+    sedangTutupOtomatis = true;
+    history.back();
+  }
 }
 document.getElementById('overlay').addEventListener('click', e=>{
   if(e.target.id === 'overlay') closeModal();
@@ -1197,7 +1203,13 @@ function closeScanModal(){
   if(scanStream){ scanStream.getTracks().forEach(t=>t.stop()); scanStream = null; }
   document.getElementById('scanOverlay').classList.remove('show');
   document.getElementById('scanModal').innerHTML = '';
-  if(!sedangProsesTombolKembali && history.state && history.state.layer === 'scan') history.back();
+  if(!sedangProsesTombolKembali && history.state && history.state.layer === 'scan'){
+    // Sama seperti closeModal(): ini penutupan programatik (mis. scan berhasil),
+    // bukan tombol kembali HP — tandai supaya popstate-nya tidak ikut menutup
+    // modal/tab di baliknya (mis. form Tambah Produk atau tab Kasir).
+    sedangTutupOtomatis = true;
+    history.back();
+  }
 }
 document.getElementById('scanOverlay').addEventListener('click', e=>{
   if(e.target.id === 'scanOverlay') closeScanModal();
@@ -1214,8 +1226,18 @@ document.getElementById('scanOverlay').addEventListener('click', e=>{
    & renderPage di atas); setiap kali ditutup lewat tombol UI (bukan tombol kembali),
    entri itu ikut "dikonsumsi" lewat history.back() supaya riwayat tidak menumpuk. */
 let sedangProsesTombolKembali = false;
+// true sesaat setelah closeModal()/closeScanModal() memanggil history.back() sendiri
+// (penutupan programatik: klik tombol, atau scan barcode/QR berhasil) — dipakai supaya
+// popstate akibat pemanggilan itu cuma "dikonsumsi" tanpa memicu penutupan lapisan lain.
+let sedangTutupOtomatis = false;
 history.replaceState({layer:'dashboard'}, '');
 window.addEventListener('popstate', ()=>{
+  if(sedangTutupOtomatis){
+    // UI sudah ditutup duluan oleh closeModal()/closeScanModal() yang memicu ini;
+    // riwayat sudah otomatis mundur satu langkah, tidak perlu diproses lagi.
+    sedangTutupOtomatis = false;
+    return;
+  }
   sedangProsesTombolKembali = true;
   try{
     if(document.getElementById('scanOverlay').classList.contains('show')){
