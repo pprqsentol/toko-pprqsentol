@@ -407,10 +407,15 @@ function ubahLokasiToko(v){
 }
 
 /* ============ SINKRON DATA SANTRI (dari Aplikasi Pondok, read-only) ============ */
-function mapSantriDariSupabase(r, saldoMap){
+function mapSantriDariSupabase(r, saldoMap, bolehHutangSet){
   return {
     id: r.id, nama: r.nama, kamar: r.kamar || '', nomorInduk: r.no_induk || '',
-    saldo: saldoMap[r.id] || 0
+    saldo: saldoMap[r.id] || 0,
+    // true kalau santri ini terdaftar di tabel boleh_hutang_santri -- boleh belanja pakai
+    // saldo walau saldo kurang (sisanya jadi hutang). Server (RPC belanja_toko) tetap yang
+    // memutuskan/mencatat pembagian saldo & hutang yang sebenarnya; ini cuma dipakai supaya
+    // kasir tidak diblokir duluan di sisi aplikasi untuk santri yang memang sudah diizinkan.
+    bolehHutang: bolehHutangSet.has(r.id)
   };
 }
 async function muatSantriDariSupabase(){
@@ -421,14 +426,17 @@ async function muatSantriDariSupabase(){
   // (santri bisa dianggap punya saldo cukup padahal sebenarnya sudah dipakai transaksi yang
   // masih tertunda) — berisiko kasir "menjual dobel" dari saldo yang sama.
   if(antrean.length > 0) return false;
-  const [{ data: santriRows, error: errSantri }, { data: saldoRows, error: errSaldo }] = await Promise.all([
+  const [{ data: santriRows, error: errSantri }, { data: saldoRows, error: errSaldo }, { data: hutangRows, error: errHutang }] = await Promise.all([
     sb.from('santri').select('id,nama,no_induk,kamar').eq('aktif', true).order('nama'),
-    sb.from('saldo_santri').select('santri_id,saldo')
+    sb.from('saldo_santri').select('santri_id,saldo'),
+    sb.from('boleh_hutang_santri').select('santri_id')
   ]);
   if(errSantri || errSaldo){ console.error('Gagal memuat santri/saldo', errSantri||errSaldo); return false; }
+  if(errHutang) console.error('Gagal memuat daftar boleh-hutang (dianggap tidak ada yang diizinkan)', errHutang);
   const saldoMap = {};
   (saldoRows||[]).forEach(r=>{ saldoMap[r.santri_id] = Number(r.saldo)||0; });
-  state.anggota = (santriRows||[]).map(r=>mapSantriDariSupabase(r, saldoMap));
+  const bolehHutangSet = new Set((hutangRows||[]).map(r=>r.santri_id));
+  state.anggota = (santriRows||[]).map(r=>mapSantriDariSupabase(r, saldoMap, bolehHutangSet));
   saveDB();
   return true;
 }
@@ -677,6 +685,13 @@ async function prosesTiket(tiket){
         trxLokal.catatan = (trxLokal.catatan||'') + ' (otomatis jadi hutang: saldo ternyata kurang saat sinkron)';
         saveDB();
         if(document.getElementById('tabelRiwayatWrap')) renderTabelRiwayat();
+      } else if(rowAsli.metode === 'Campuran' && trxLokal.metode !== 'campuran'){
+        // Santri boleh-hutang, saldo kurang -> server bagi otomatis: sebagian saldo, sisanya hutang.
+        trxLokal.metode = 'campuran';
+        trxLokal.statusBayar = rowAsli.status_bayar || 'belum_bayar';
+        trxLokal.catatan = (trxLokal.catatan||'') + ' (sebagian dibayar saldo, sisanya jadi hutang)';
+        saveDB();
+        if(document.getElementById('tabelRiwayatWrap')) renderTabelRiwayat();
       }
     }
   } else if(tiket.tipe === 'transaksi_batal'){
@@ -768,7 +783,7 @@ function mapTransaksiTokoDariSupabase(r){
   return {
     id: r.id, clientId: r.client_id || null, tipe:'jual', tanggal: r.created_at, lokasi: r.lokasi,
     anggotaId: r.santri_id || null, anggotaNama: (r.santri && r.santri.nama) || r.catatan || null,
-    metode: r.metode==='Saldo' ? 'saldo' : r.metode==='Hutang' ? 'hutang' : 'tunai',
+    metode: r.metode==='Saldo' ? 'saldo' : r.metode==='Hutang' ? 'hutang' : r.metode==='Campuran' ? 'campuran' : 'tunai',
     statusBayar: r.status_bayar || (r.metode==='Hutang' ? 'belum_bayar' : 'lunas'),
     total: Number(r.total)||0,
     dibatalkan: !!r.dibatalkan, dibatalkanPada: r.dibatalkan_pada || null, lunasPada: r.lunas_pada || null,
@@ -804,7 +819,7 @@ function mapTransaksiItemDariSupabase(r){
     // mencocokkan status batal/lunas terbaru, itu tugas daftarTransaksiToko/transaksiTokoCache).
     transaksiId: r.transaksi_id, transaksiClientId: r.client_id || null,
     tanggal: r.created_at, lokasi: r.lokasi,
-    metode: r.metode==='Saldo' ? 'saldo' : r.metode==='Hutang' ? 'hutang' : 'tunai',
+    metode: r.metode==='Saldo' ? 'saldo' : r.metode==='Hutang' ? 'hutang' : r.metode==='Campuran' ? 'campuran' : 'tunai',
     statusBayar: r.status_bayar, dibatalkan: !!r.dibatalkan,
     produkId: r.produk_id, namaProduk: r.nama_produk,
     hargaJual: Number(r.harga_jual)||0, hargaBeli: Number(r.harga_beli)||0, qty: Number(r.qty)||0
@@ -1094,6 +1109,7 @@ function tagTipeTransaksi(t){
   if(t.tipe==='topup') tag = '<span class="tag topup">Top Up</span>';
   else if(t.tipe==='tarik') tag = '<span class="tag tarik">Tarik Tunai</span>';
   else if(t.metode==='hutang') tag = t.statusBayar==='lunas' ? '<span class="tag lunas">Hutang · Lunas</span>' : '<span class="tag hutang">Hutang · Belum Bayar</span>';
+  else if(t.metode==='campuran') tag = t.statusBayar==='lunas' ? '<span class="tag lunas">Saldo+Hutang · Lunas</span>' : '<span class="tag hutang">Saldo+Hutang · Belum Bayar</span>';
   else tag = t.metode==='saldo' ? '<span class="tag saldo">Saldo</span>' : '<span class="tag tunai">Tunai</span>';
   if(t.dibatalkan) tag += ' <span class="tag batal">Dibatalkan</span>';
   return tag;
@@ -2291,7 +2307,13 @@ function prosesTransaksi(){
   if(kasirAnggotaId){
     anggota = state.anggota.find(x=>x.id===kasirAnggotaId);
     if(!anggota){ toast('Anggota tidak ditemukan'); return; }
-    if(anggota.saldo < total){ toast('Saldo anggota tidak cukup, gunakan tunai atau top up dulu'); return; }
+    if(anggota.saldo < total && !anggota.bolehHutang){
+      toast('Saldo anggota tidak cukup, gunakan tunai atau top up dulu'); return;
+    }
+    // Kalau saldo kurang tapi santri ini terdaftar boleh hutang, transaksi tetap diproses --
+    // server (RPC belanja_toko) yang menentukan & mencatat pembagian saldo/hutang yang
+    // sebenarnya (metode dicatat 'Campuran' di server kalau memang kurang; lihat kode sinkron
+    // di bawah yang menyesuaikan metode lokal begitu hasil dari server datang).
     metode = 'saldo';
     bayar = total; kembalian = 0;
   } else if(statusBayarKasir === 'belum_bayar'){
