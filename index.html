@@ -829,7 +829,12 @@ async function sinkronTransaksiItemToko(){
   if(!navigator.onLine) return false;
   if(antrean.length > 0) return false;
   try{
-    const { data, error } = await sb.from('v_transaksi_item').select('*').eq('lokasi', lokasiToko).limit(20000);
+    // PENTING: diurutkan dari yang TERBARU dulu (sama seperti tarikTransaksiTokoDariSupabase), supaya
+    // kalau jumlah baris di v_transaksi_item sudah melebihi limit 20000, yang terpotong adalah data
+    // paling lama — bukan transaksi hari ini. Sebelumnya query ini tidak diurutkan sama sekali, jadi
+    // server bebas mengembalikan 20000 baris dalam urutan apa pun, dan transaksi hari ini bisa saja
+    // ikut terpotong -> itu penyebab Omzet di Laporan lebih kecil dari Dashboard.
+    const { data, error } = await sb.from('v_transaksi_item').select('*').eq('lokasi', lokasiToko).order('created_at', { ascending:false }).limit(20000);
     if(error){ console.error('Gagal sinkron v_transaksi_item', error); return false; }
     state.transaksiItemCache = (data||[]).map(mapTransaksiItemDariSupabase);
     saveDB();
