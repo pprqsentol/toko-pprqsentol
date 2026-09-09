@@ -1,4 +1,4 @@
-const CACHE_NAME = 'kasir-toko-v48-boleh-hutang-santri';
+const CACHE_NAME = 'kasir-toko-v49-omzet-identik';
 const ASSETS = [
   './',
   './index.html',

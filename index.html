@@ -1434,20 +1434,22 @@ function hitungProdukTerlaris(limit){
 }
 pages.dashboard = function(){
   const totalSaldo = state.anggota.reduce((s,a)=>s+a.saldo,0);
-  const todayTx = daftarTransaksiToko().filter(t=>tanggalLokal(new Date(t.tanggal))===todayISO() && t.tipe==='jual' && !t.dibatalkan);
-  const todayOmzet = todayTx.reduce((s,t)=>s+t.total,0);
-  const todayModal = todayTx.reduce((s,t)=>s+t.items.reduce((ss,i)=>ss+(i.hargaBeli||0)*i.qty,0),0);
-  let todayOmzetTunai=0, todayModalTunai=0, todayOmzetKredit=0, todayModalKredit=0;
-  todayTx.forEach(t=>{
-    const beli = t.items.reduce((ss,i)=>ss+(i.hargaBeli||0)*i.qty,0);
-    if(t.metode==='hutang'){ todayOmzetKredit+=t.total; todayModalKredit+=beli; }
-    else { todayOmzetTunai+=t.total; todayModalTunai+=beli; }
-  });
-  const todayLabaTunai = todayOmzetTunai - todayModalTunai;
-  const todayLabaKredit = todayOmzetKredit - todayModalKredit;
-  const todayLaba = todayOmzet - todayModal;
-  const todayTopup = daftarTransaksiToko().filter(t=>t.tipe==='topup' && !t.dibatalkan && tanggalLokal(new Date(t.tanggal))===todayISO()).reduce((s,t)=>s+t.total,0);
-  const todayTarik = daftarTransaksiToko().filter(t=>t.tipe==='tarik' && !t.dibatalkan && tanggalLokal(new Date(t.tanggal))===todayISO()).reduce((s,t)=>s+t.total,0);
+  const today = todayISO();
+  // PENTING: Omzet/Laba/jumlah transaksi "Hari Ini" dihitung lewat hitungLaporan(today, today) —
+  // fungsi YANG SAMA PERSIS dipakai tab Keuangan — bukan dihitung ulang terpisah dari cache header
+  // transaksi (transaksiTokoCache). Sebelumnya Dashboard menjumlah t.total dari daftarTransaksiToko()
+  // sementara Laporan menjumlah hargaJual*qty dari daftarItemTransaksiToko(); dua cache itu disinkron
+  // terpisah (lihat sinkronRingkasanDanRiwayatToko) dan bisa beda kesegarannya kalau salah satu gagal
+  // tarik data, jadi angkanya bisa selisih. Dengan manggil fungsi yang sama, dijamin identik selalu,
+  // apa pun kondisi sinkronnya.
+  const todayHitung = hitungLaporan(today, today);
+  const todayOmzet = todayHitung.omzet;
+  const todayLabaTunai = todayHitung.labaTunai;
+  const todayLabaKredit = todayHitung.labaKredit;
+  const todayLaba = todayHitung.laba;
+  const todayTxCount = todayHitung.jumlahTransaksi;
+  const todayTopup = daftarTransaksiToko().filter(t=>t.tipe==='topup' && !t.dibatalkan && tanggalLokal(new Date(t.tanggal))===today).reduce((s,t)=>s+t.total,0);
+  const todayTarik = daftarTransaksiToko().filter(t=>t.tipe==='tarik' && !t.dibatalkan && tanggalLokal(new Date(t.tanggal))===today).reduce((s,t)=>s+t.total,0);
   const lowStock = state.produk.filter(p=>p.stok<=5);
   const recent = [...daftarTransaksiToko()].sort((a,b)=>new Date(b.tanggal)-new Date(a.tanggal)).slice(0,6);
   const produkTerlaris = hitungProdukTerlaris(10);
@@ -1482,7 +1484,7 @@ pages.dashboard = function(){
       </div>
       <div class="card">
         <div class="label">Transaksi Hari Ini</div>
-        <div class="value">${todayTx.length}</div>
+        <div class="value">${todayTxCount}</div>
       </div>
       <div class="card">
         <div class="label">Top Up Hari Ini</div>
