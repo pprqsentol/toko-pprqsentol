@@ -1795,8 +1795,8 @@ function openTambahProduk(){
       <details style="margin:2px 0 14px;">
         <summary style="cursor:pointer;font-size:12.5px;font-weight:600;color:var(--primary-dark);">+ Harga Grosir & Satuan Besar (opsional)</summary>
         <div style="margin-top:10px;">
-          <p style="font-size:12px;color:var(--muted);margin:0 0 8px;">Harga grosir aktif otomatis kalau beli mencapai jumlah minimal (misal beli ≥3 pcs). Satuan besar (Dus/Karton) dijual sebagai unit terpisah di kasir.</p>
-          <div class="field"><label>Harga Grosir (per pcs)</label><input id="fHargaGrosir" type="text" inputmode="numeric" placeholder="Kosongkan jika tidak ada"></div>
+          <p style="font-size:12px;color:var(--muted);margin:0 0 8px;">Isi TOTAL harga untuk sejumlah qty minimal (misal beli 3 pcs = Rp2.000, bukan harga per 1 pcs). Kalau beli kelipatannya (6, 9, dst) otomatis dihitung per bundel; sisa yang belum genap kelipatan tetap pakai harga ecer. Satuan besar (Dus/Karton) dijual sebagai unit terpisah di kasir.</p>
+          <div class="field"><label>Harga Grosir (Total per qty minimal)</label><input id="fHargaGrosir" type="text" inputmode="numeric" placeholder="mis. 2000 untuk 3 pcs"></div>
           <div class="field"><label>Minimal Qty buat Harga Grosir</label><input id="fQtyGrosir" type="number" min="2" placeholder="mis. 3"></div>
           <div class="field"><label>Nama Satuan Besar</label><input id="fNamaSatuanBesar" type="text" placeholder="mis. Dus / Karton"></div>
           <div class="field"><label>Isi per Satuan Besar (pcs)</label><input id="fIsiSatuanBesar" type="number" min="2" placeholder="mis. 48"></div>
@@ -1856,8 +1856,8 @@ function openEditProduk(id){
       <details style="margin:2px 0 14px;" ${(p.hargaGrosir||p.namaSatuanBesar)?'open':''}>
         <summary style="cursor:pointer;font-size:12.5px;font-weight:600;color:var(--primary-dark);">+ Harga Grosir & Satuan Besar (opsional)</summary>
         <div style="margin-top:10px;">
-          <p style="font-size:12px;color:var(--muted);margin:0 0 8px;">Harga grosir aktif otomatis kalau beli mencapai jumlah minimal (misal beli ≥3 pcs). Satuan besar (Dus/Karton) dijual sebagai unit terpisah di kasir.</p>
-          <div class="field"><label>Harga Grosir (per pcs)</label><input id="fHargaGrosir" type="text" inputmode="numeric" value="${p.hargaGrosir||''}" placeholder="Kosongkan jika tidak ada"></div>
+          <p style="font-size:12px;color:var(--muted);margin:0 0 8px;">Isi TOTAL harga untuk sejumlah qty minimal (misal beli 3 pcs = Rp2.000, bukan harga per 1 pcs). Kalau beli kelipatannya (6, 9, dst) otomatis dihitung per bundel; sisa yang belum genap kelipatan tetap pakai harga ecer. Satuan besar (Dus/Karton) dijual sebagai unit terpisah di kasir.</p>
+          <div class="field"><label>Harga Grosir (Total per qty minimal)</label><input id="fHargaGrosir" type="text" inputmode="numeric" value="${p.hargaGrosir||''}" placeholder="mis. 2000 untuk 3 pcs"></div>
           <div class="field"><label>Minimal Qty buat Harga Grosir</label><input id="fQtyGrosir" type="number" min="2" value="${p.qtyGrosir||''}" placeholder="mis. 3"></div>
           <div class="field"><label>Nama Satuan Besar</label><input id="fNamaSatuanBesar" type="text" value="${p.namaSatuanBesar||''}" placeholder="mis. Dus / Karton"></div>
           <div class="field"><label>Isi per Satuan Besar (pcs)</label><input id="fIsiSatuanBesar" type="number" min="2" value="${p.isiSatuanBesar||''}" placeholder="mis. 48"></div>
@@ -2139,7 +2139,7 @@ function renderProdukGrid(filter){
   const list = state.produk.filter(p=>p.nama.toLowerCase().includes(filter));
   if(!list.length){ grid.innerHTML = `<div class="empty">Tidak ada produk.</div>`; return; }
   grid.innerHTML = list.map(p=>{
-    const grosirTxt = p.hargaGrosir && p.qtyGrosir ? `<span class="produk-row-sub">Grosir ${rupiah(p.hargaGrosir)} (≥${p.qtyGrosir} pcs)</span>` : '';
+    const grosirTxt = p.hargaGrosir && p.qtyGrosir ? `<span class="produk-row-sub">Grosir ${rupiah(p.hargaGrosir)} / ${p.qtyGrosir} pcs</span>` : '';
     const besarBtn = p.namaSatuanBesar && p.isiSatuanBesar>0 && p.hargaSatuanBesar>0
       ? `<span class="produk-row-besar" onclick="event.stopPropagation();tambahKeKeranjang('${p.id}','besar')">+1 ${p.namaSatuanBesar}</span>`
       : '';
@@ -2151,10 +2151,22 @@ function renderProdukGrid(filter){
     </button>
   `;}).join('');
 }
-// Harga efektif per pcs: otomatis pakai harga grosir kalau qty sudah mencapai ambang minimal.
+// Total harga utk qty pcs suatu produk. hargaGrosir = TOTAL harga per bundel (qtyGrosir pcs), bukan per pcs.
+// Berlaku per kelipatan bundel; sisa yang belum genap kelipatan tetap pakai harga ecer.
+// Misal qtyGrosir=3, hargaGrosir=2000, harga ecer=1000: beli 4 pcs = 1 bundel(2000) + 1 sisa(1000) = 3000.
+function totalHargaPcs(p, qty){
+  if(p.hargaGrosir>0 && p.qtyGrosir>0 && qty>=p.qtyGrosir){
+    const bundel = Math.floor(qty / p.qtyGrosir);
+    const sisa = qty % p.qtyGrosir;
+    return bundel*p.hargaGrosir + sisa*p.harga;
+  }
+  return qty*p.harga;
+}
+// Harga efektif per pcs (rata-rata): dipakai sebagai c.harga supaya semua tempat yang hitung harga*qty
+// (kasir, struk, laporan, omzet) tetap akurat tanpa perlu diubah satu-satu.
 function hargaEfektifPcs(p, qty){
-  if(p.hargaGrosir>0 && p.qtyGrosir>0 && qty>=p.qtyGrosir) return p.hargaGrosir;
-  return p.harga;
+  if(qty<=0) return p.harga;
+  return totalHargaPcs(p, qty) / qty;
 }
 // Total pcs yang sudah dipakai di keranjang untuk 1 produk, dijumlahkan dari SEMUA baris (satuan pcs maupun satuan besar).
 function totalPcsDipakaiDiKeranjang(produkId){
@@ -2168,7 +2180,10 @@ function tambahKeKeranjang(produkId, satuan){
   const existing = cart.find(c=>c.key===key);
   const pcsDipakaiSekarang = totalPcsDipakaiDiKeranjang(produkId);
   if(pcsDipakaiSekarang + pcsPerSatuan > p.stok){ toast('Stok tidak cukup'); return; }
-  if(existing){ existing.qty++; }
+  if(existing){
+    existing.qty++;
+    if(existing.satuan==='pcs') existing.harga = hargaEfektifPcs(p, existing.qty);
+  }
   else {
     cart.push({ key, produkId: p.id, nama: p.nama, satuan, satuanLabel: satuan==='besar' ? p.namaSatuanBesar : '', pcsPerSatuan, qty: 1, harga: satuan==='besar' ? p.hargaSatuanBesar : p.harga, hargaBeli: (p.hargaBeli||0)*pcsPerSatuan });
   }
