@@ -2382,7 +2382,13 @@ function prosesTransaksi(){
     // produkIdLokal (bukan produk_id final) sengaja disimpan apa adanya di sini — diterjemahkan
     // ke id asli Supabase nanti saat tiket ini benar-benar dikirim (lihat prosesTiket), supaya
     // tetap benar walau produknya sendiri juga baru saja dibuat offline dan belum sinkron.
-    items: cart.map(c=>({ produkIdLokal: c.produkId, nama_produk: c.nama, harga_jual: c.harga, harga_beli: c.hargaBeli||0, qty: c.qty*(c.pcsPerSatuan||1) })),
+    // PENTING: qty di bawah ini dikonversi ke total pcs (bukan qty asli di keranjang) supaya
+    // pengurangan stok di server akurat untuk satuan besar (mis. per Dus). Karena itu harga_jual
+    // WAJIB ikut dinormalisasi ke harga per pcs juga (c.harga / pcsPerSatuan) -- kalau tidak, unit
+    // qty (pcs) dan harga_jual (per-satuan-besar) jadi tidak nyambung dan total di server salah
+    // hitung (bug: 5 Dus Air gelas @17000 bisa tercatat Rp120.000 atau malah Rp4.080.000, padahal
+    // seharusnya Rp85.000). Pembagian ini selalu genap karena qty pcs selalu kelipatan pcsPerSatuan.
+    items: cart.map(c=>({ produkIdLokal: c.produkId, nama_produk: c.nama, harga_jual: (c.pcsPerSatuan||1) > 1 ? c.harga / c.pcsPerSatuan : c.harga, harga_beli: c.hargaBeli||0, qty: c.qty*(c.pcsPerSatuan||1) })),
     lokasi: lokasiToko,
     catatan: namaPembeliHutang || null,
     dicatatOleh: lastAuthEmail || null
