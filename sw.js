@@ -1,4 +1,4 @@
-const CACHE_NAME = 'kasir-toko-v50-fix-harga-satuan-besar';
+const CACHE_NAME = 'kasir-toko-v51-fix-modal-satuan-besar';
 const ASSETS = [
   './',
   './index.html',
