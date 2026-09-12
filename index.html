@@ -2685,7 +2685,15 @@ function hitungLabaKumulatif(){
 function hitungPiutangBelumLunas(){
   return daftarTransaksiToko().filter(t=>t.tipe==='jual' && t.metode==='hutang' && t.statusBayar==='belum_bayar' && !t.dibatalkan).reduce((s,t)=>s+t.total,0);
 }
-// Modal = Saldo Kas + Nilai Stok + Piutang − Laba Kumulatif + Biaya Operasional Kumulatif + Prive Kumulatif.
+// Modal = Saldo Kas + Nilai Stok + Piutang − Laba Kumulatif.
+// PENTING: Saldo Kas SUDAH otomatis terpotong oleh SEMUA kas keluar (termasuk Prive & Biaya
+// Operasional -- lihat mutasi_manual_bersih di sinkronRingkasanToko/hitungSaldoKasSaatIni), jadi
+// Biaya Operasional Kumulatif & Prive Kumulatif TIDAK BOLEH ditambahkan lagi di sini -- itu dobel
+// hitung (sebelumnya rumus di sini menambahkan keduanya lagi, jadi Modal Saat Ini kelihatan lebih
+// besar dari yang sebenarnya). Baris itu tetap ditampilkan di bawah, tapi cuma sebagai informasi,
+// bukan ditambahkan ke total. Catatan: kolom modal_saat_ini di view v_ringkasan_toko (server) masih
+// punya bug yang sama, makanya di sini kita SENGAJA tidak memakai r.modalSaatIni langsung dari
+// server -- dihitung ulang sendiri di klien pakai rumus yang benar, tanpa perlu ubah apa pun di database.
 // Tidak perlu input manual (tidak ada "Modal Awal") — dihitung otomatis dari data yang sudah ada.
 // Angka ini SEHARUSNYA STABIL dari waktu ke waktu (naik/turun jelas dari Setor Modal atau Prive yang kamu catat sendiri).
 // Kalau tiba-tiba turun tanpa sebab yang jelas, itu tanda ada barang hilang/susut atau salah catat.
@@ -2699,7 +2707,7 @@ function renderCekModal(wrapId){
     const r = state.ringkasanToko;
     nilaiStok = r.nilaiStok; saldoKas = r.saldoKas; piutang = r.piutang;
     labaKumulatif = r.labaKumulatif; biayaOperasionalKumulatif = r.biayaOperasionalKumulatif;
-    priveKumulatif = r.priveKumulatif; modal = r.modalSaatIni;
+    priveKumulatif = r.priveKumulatif;
   } else {
     nilaiStok = hitungNilaiStokSaatIni();
     saldoKas = hitungSaldoKasSaatIni();
@@ -2707,15 +2715,17 @@ function renderCekModal(wrapId){
     labaKumulatif = hitungLabaKumulatif().labaKumulatif;
     biayaOperasionalKumulatif = state.kasMutasi.filter(m=>m.arah==='keluar' && m.kategori==='operasional').reduce((s,m)=>s+m.jumlah,0);
     priveKumulatif = state.kasMutasi.filter(m=>m.arah==='keluar' && m.kategori==='prive').reduce((s,m)=>s+m.jumlah,0);
-    modal = saldoKas + nilaiStok + piutang - labaKumulatif + biayaOperasionalKumulatif + priveKumulatif;
   }
+  modal = saldoKas + nilaiStok + piutang - labaKumulatif;
   const baris = [
     ['Saldo Kas', saldoKas, true],
     ['+ Nilai Stok', nilaiStok, true],
     ['+ Piutang', piutang, piutang>0],
     ['− Total Laba', labaKumulatif, true],
-    ['+ Biaya Operasional Kumulatif', biayaOperasionalKumulatif, biayaOperasionalKumulatif>0],
-    ['+ Prive Kumulatif', priveKumulatif, priveKumulatif>0],
+    // Biaya Operasional & Prive Kumulatif sengaja TIDAK ditampilkan lagi di rincian ini -- sudah
+    // bisa dilihat langsung di tab Kas > dropdown Mutasi Keluar, jadi tidak perlu diulang di sini.
+    // Nilainya tetap dihitung di atas (dipakai untuk memastikan tidak dobel hitung ke Modal Saat Ini),
+    // cuma tidak ditaruh di baris tabel.
   ];
   wrap.innerHTML = `
     <p style="font-size:13.5px;color:var(--muted);margin-top:0;">Modal = uang tunai + nilai barang di rak + piutang pelanggan, dikeluarkan dari laba yang sudah dihasilkan. Angka ini seharusnya <strong>stabil</strong> dari waktu ke waktu — kalau tiba-tiba turun sendiri (di luar Prive/Biaya Operasional yang kamu catat), itu tanda ada barang hilang/susut atau salah catat.</p>
