@@ -799,10 +799,22 @@ async function tarikTransaksiTokoDariSupabase(){
   if(!navigator.onLine) return false;
   if(antrean.length > 0) return false; // sama seperti data lain: jangan timpa cache selama masih ada tiket yang menunggu dikirim
   try{
-    const { data: headerRows, error: errHeader } = await sb.from('transaksi_toko')
-      .select('*, santri:santri_id(nama)').eq('lokasi', lokasiToko).order('created_at', { ascending:false }).limit(3000);
-    if(errHeader){ console.error('Gagal menarik riwayat transaksi_toko', errHeader); return false; }
-    state.transaksiTokoCache = (headerRows||[]).map(mapTransaksiTokoDariSupabase);
+    // PENTING: sama seperti sinkronTransaksiItemToko, .limit(3000) di sini TIDAK cukup sendirian --
+    // Supabase API punya batas "Max Rows" per request (defaultnya 1000) yang diam-diam memotong hasil
+    // walau kita minta lebih banyak. Begitu transaksi_toko tembus 1000 baris, jumlah transaksi/Riwayat/
+    // Dashboard bakal ikut kepotong dengan cara yang sama seperti Laporan kalau tidak di-pagination.
+    const HALAMAN = 1000;
+    let semua = [];
+    for(let dari=0; ; dari+=HALAMAN){
+      const { data, error: errHeader } = await sb.from('transaksi_toko')
+        .select('*, santri:santri_id(nama)').eq('lokasi', lokasiToko).order('created_at', { ascending:false })
+        .range(dari, dari+HALAMAN-1);
+      if(errHeader){ console.error('Gagal menarik riwayat transaksi_toko', errHeader); return false; }
+      semua = semua.concat(data||[]);
+      if(!data || data.length < HALAMAN) break;
+      if(semua.length > 200000) break; // pengaman ekstra, jangan sampai loop tanpa henti
+    }
+    state.transaksiTokoCache = semua.map(mapTransaksiTokoDariSupabase);
     saveDB();
     return true;
   }catch(e){ console.error('Gagal menarik riwayat transaksi_toko', e); return false; }
@@ -829,14 +841,25 @@ async function sinkronTransaksiItemToko(){
   if(!navigator.onLine) return false;
   if(antrean.length > 0) return false;
   try{
-    // PENTING: diurutkan dari yang TERBARU dulu (sama seperti tarikTransaksiTokoDariSupabase), supaya
-    // kalau jumlah baris di v_transaksi_item sudah melebihi limit 20000, yang terpotong adalah data
-    // paling lama — bukan transaksi hari ini. Sebelumnya query ini tidak diurutkan sama sekali, jadi
-    // server bebas mengembalikan 20000 baris dalam urutan apa pun, dan transaksi hari ini bisa saja
-    // ikut terpotong -> itu penyebab Omzet di Laporan lebih kecil dari Dashboard.
-    const { data, error } = await sb.from('v_transaksi_item').select('*').eq('lokasi', lokasiToko).order('created_at', { ascending:false }).limit(20000);
-    if(error){ console.error('Gagal sinkron v_transaksi_item', error); return false; }
-    state.transaksiItemCache = (data||[]).map(mapTransaksiItemDariSupabase);
+    // PENTING: Supabase API punya batas "Max Rows" (defaultnya 1000) PER REQUEST, terpisah dari
+    // .limit() yang kita minta di kode. Kalau baris di v_transaksi_item sudah lebih dari 1000, request
+    // sekali jalan diam-diam cuma balikin 1000 baris teratas walau kita minta limit(20000) -- dan
+    // karena diurutkan dari TERBARU, yang hilang adalah data paling LAMA (persis penyebab Omzet di
+    // Laporan untuk tanggal lama jadi Rp0, walau jumlah transaksinya tetap benar). Makanya di sini
+    // kita tarik per 1000 baris pakai .range() diulang terus sampai baris yang balik lebih sedikit
+    // dari batas per halaman -- artinya sudah sampai halaman terakhir, apapun total barisnya.
+    const HALAMAN = 1000;
+    let semua = [];
+    for(let dari=0; ; dari+=HALAMAN){
+      const { data, error } = await sb.from('v_transaksi_item').select('*')
+        .eq('lokasi', lokasiToko).order('created_at', { ascending:false })
+        .range(dari, dari+HALAMAN-1);
+      if(error){ console.error('Gagal sinkron v_transaksi_item', error); return false; }
+      semua = semua.concat(data||[]);
+      if(!data || data.length < HALAMAN) break; // halaman terakhir sudah tercapai
+      if(semua.length > 200000) break; // pengaman ekstra, jangan sampai loop tanpa henti
+    }
+    state.transaksiItemCache = semua.map(mapTransaksiItemDariSupabase);
     saveDB();
     return true;
   }catch(e){ console.error('Gagal sinkron v_transaksi_item', e); return false; }

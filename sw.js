@@ -1,4 +1,4 @@
-const CACHE_NAME = 'kasir-toko-v51-fix-modal-satuan-besar';
+const CACHE_NAME = 'kasir-toko-v52-fix-pagination-sinkron';
 const ASSETS = [
   './',
   './index.html',
