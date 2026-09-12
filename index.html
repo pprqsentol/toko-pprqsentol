@@ -1205,6 +1205,12 @@ function toast(msg){
 
 /* ============ NAV / ROUTER ============ */
 const pages = {};
+// Nama halaman yang sedang aktif — dilacak lewat variabel sendiri (bukan cuma lewat
+// class "active" di tombol nav), karena "beranda" tidak terikat ke tombol nav manapun
+// (tidak ada tombol beranda). Kalau cuma mengandalkan class "active", transisi
+// beranda -> tab pertama tidak akan tercatat di riwayat browser, dan tombol kembali HP
+// bisa langsung menutup aplikasi alih-alih kembali ke beranda.
+let halamanSaatIni = null;
 document.getElementById('nav').addEventListener('click', e=>{
   const btn = e.target.closest('button[data-page]');
   if(!btn) return;
@@ -1227,7 +1233,7 @@ async function refreshData(){
     muatSantriDariSupabase(), muatProdukDariSupabase(), muatKasDariSupabase()
   ]);
   await sinkronRingkasanDanRiwayatToko();
-  const halamanAktif = document.querySelector('.nav button.active')?.dataset.page;
+  const halamanAktif = halamanSaatIni;
   if(halamanAktif && pages[halamanAktif]) renderPage(halamanAktif);
   perbaruiBadgeStokMenipis();
   toast((okSantri || okProduk || okKas) ? '✅ Data diperbarui' : 'Belum ada yang diperbarui (masih ada transaksi menunggu terkirim, atau gagal memuat)');
@@ -1260,7 +1266,8 @@ const JUDUL_HALAMAN = {
   riwayat:'🕘 Riwayat', kas:'💰 Kas', laporan:'📊 Laporan', pengaturan:'⚙️ Pengaturan'
 };
 function renderPage(name){
-  const halamanSebelumnya = document.querySelector('.nav button.active')?.dataset.page;
+  const halamanSebelumnya = halamanSaatIni;
+  halamanSaatIni = name;
   document.querySelectorAll('.nav button').forEach(b=>b.classList.toggle('active', b.dataset.page===name));
   document.getElementById('main').innerHTML = pages[name]();
   attachPageEvents(name);
@@ -1368,8 +1375,7 @@ window.addEventListener('popstate', ()=>{
     } else if(document.getElementById('overlay').classList.contains('show')){
       closeModal();
     } else {
-      const halamanAktif = document.querySelector('.nav button.active')?.dataset.page;
-      if(halamanAktif){
+      if(halamanSaatIni && halamanSaatIni !== 'beranda'){
         renderPage('beranda');
       }
       // Kalau sudah di beranda & tidak ada apa pun terbuka: tidak ada lagi yg perlu
