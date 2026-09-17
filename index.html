@@ -342,8 +342,8 @@
 /* ============ SUPABASE ============
    Dipakai untuk: login (Produk & Laporan), dan sinkron data (produk, transaksi
    toko, saldo santri) dengan database bersama Pondok/Keuangan. */
-const SUPABASE_URL = 'https://hvivddbhacoppkbtiqpe.supabase.co';
-const SUPABASE_KEY = 'sb_publishable_BTFxSTrt1vM1seoQaXG_7g_mqYo5aqq';
+const SUPABASE_URL = 'https://liivvueodribjwipmbrl.supabase.co';
+const SUPABASE_KEY = 'sb_publishable_KKSw-wparSwNbIvR9wHhyQ_Pc1NdcKG';
 const sb = window.supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
 
 /* ============ QR CODE ENGINE (qrcode-generator by Kazuhiko Arase, MIT License) — disertakan langsung di sini agar aplikasi tetap 100% offline tanpa perlu memuat library dari internet ============ */
@@ -675,7 +675,7 @@ function escapeHtml(s){
 
 async function prosesTiket(tiket){
   if(tiket.tipe === 'produk_baru'){
-    const { data, error } = await sb.from('produk').insert(mapProdukKeSupabase(tiket.payload)).select().single();
+    const { data, error } = await sb.from('produk').insert(mapProdukKeSupabase(tiket.payload)).select('id').single();
     if(error) throw error;
     // Tukar id sementara (dibuat offline) dengan id asli dari server, di semua tempat yang mungkin memakainya
     tukarIdProdukSementara(tiket.payload.id, data.id);
@@ -806,7 +806,7 @@ async function muatKasDariSupabase(){
   if(antrean.length > 0) return false; // sama seperti produk/santri: jangan tarik selama masih ada tiket kas yang menunggu dikirim
   try{
     const [{ data: mutasiRows, error: errMutasi }, { data: pengaturanRow, error: errPengaturan }] = await Promise.all([
-      sb.from('kas_mutasi').select('*').eq('lokasi', lokasiToko),
+      sb.from('kas_mutasi').select('id,lokasi,tanggal,arah,kategori,jumlah,catatan').eq('lokasi', lokasiToko),
       sb.from('pengaturan_kas').select('kas_awal,modal_awal').eq('lokasi', lokasiToko).maybeSingle()
     ]);
     if(errMutasi || errPengaturan){ console.error('Gagal memuat data kas dari Supabase', errMutasi||errPengaturan); return false; }
@@ -860,7 +860,7 @@ async function tarikTransaksiTokoDariSupabase(){
     let semua = [];
     for(let dari=0; ; dari+=HALAMAN){
       const { data, error: errHeader } = await sb.from('transaksi_toko')
-        .select('*, santri:santri_id(nama)').eq('lokasi', lokasiToko).order('created_at', { ascending:false })
+        .select('id,santri_id,items,total,metode,status_bayar,lokasi,catatan,dicatat_oleh,client_id,created_at,dibatalkan,dibatalkan_pada,lunas_pada,santri:santri_id(nama)').eq('lokasi', lokasiToko).order('created_at', { ascending:false })
         .range(dari, dari+HALAMAN-1);
       if(errHeader){ console.error('Gagal menarik riwayat transaksi_toko', errHeader); return false; }
       semua = semua.concat(data||[]);
@@ -904,7 +904,8 @@ async function sinkronTransaksiItemToko(){
     const HALAMAN = 1000;
     let semua = [];
     for(let dari=0; ; dari+=HALAMAN){
-      const { data, error } = await sb.from('v_transaksi_item').select('*')
+      const { data, error } = await sb.from('v_transaksi_item')
+        .select('transaksi_id,client_id,lokasi,metode,status_bayar,dibatalkan,created_at,produk_id,nama_produk,qty,harga_jual,harga_beli')
         .eq('lokasi', lokasiToko).order('created_at', { ascending:false })
         .range(dari, dari+HALAMAN-1);
       if(error){ console.error('Gagal sinkron v_transaksi_item', error); return false; }
@@ -940,7 +941,9 @@ async function sinkronRingkasanToko(){
   if(!navigator.onLine) return false;
   if(antrean.length > 0) return false; // ada tiket menunggu -> angka di server belum termasuk perubahan itu, jangan timpa cache dulu
   try{
-    const { data, error } = await sb.from('v_ringkasan_toko').select('*').eq('lokasi', lokasiToko).maybeSingle();
+    const { data, error } = await sb.from('v_ringkasan_toko')
+      .select('lokasi,kas_awal,modal_awal,saldo_kas,nilai_stok,piutang,omzet_kumulatif,modal_terjual_kumulatif,laba_kumulatif,biaya_operasional_kumulatif,prive_kumulatif,modal_saat_ini')
+      .eq('lokasi', lokasiToko).maybeSingle();
     if(error){ console.error('Gagal sinkron v_ringkasan_toko', error); return false; }
     if(data) state.ringkasanToko = mapRingkasanDariSupabase(data);
     saveDB();
@@ -1037,7 +1040,9 @@ async function muatProdukDariSupabase(){
   // (mis. transaksi/edit produk) yang menunggu dikirim — supaya stok yang ditampilkan tidak
   // "kembali" ke angka lama sebelum transaksi yang masih tertunda itu benar-benar sinkron.
   if(antrean.length > 0) return false;
-  const { data, error } = await sb.from('produk').select('*').eq('lokasi', lokasiToko).order('nama');
+  const { data, error } = await sb.from('produk')
+    .select('id,nama,kategori,barcode,harga_beli,harga_jual,stok,harga_grosir,qty_grosir,nama_satuan_besar,isi_satuan_besar,harga_satuan_besar,aktif')
+    .eq('lokasi', lokasiToko).order('nama');
   if(error){ console.error('Gagal memuat produk dari Supabase', error); return false; }
   state.produk = (data||[]).map(mapProdukDariSupabase);
   saveDB();
