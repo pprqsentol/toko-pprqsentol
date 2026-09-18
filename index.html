@@ -413,10 +413,18 @@ function bentukAwalState(){
     anggota:[], produk:[], transaksi:[], riwayatBarcode:{}, kasAwal:0, modalAwal:0, kasMutasi:[],
     // Cache hasil tarik-balik dari Supabase — dipakai sebagai "sumber kebenaran" untuk Dashboard/Kas/Laporan
     // supaya angkanya selalu selaras dengan aplikasi lain (Pondok dll), dan sekaligus jadi cadangan aman
-    // andai HP hilang/direset (lihat tarikTransaksiTokoDariSupabase, sinkronRingkasanToko, sinkronTransaksiItemToko).
-    transaksiTokoCache: [], // replika riwayat transaksi_toko (+item) dari server, per lokasi
-    transaksiItemCache: [], // replika baris v_transaksi_item (per produk terjual) dari server, per lokasi
-    ringkasanToko: null // replika 1 baris v_ringkasan_toko (kas/modal/laba kumulatif) untuk lokasi ini
+    // andai HP hilang/direset (lihat tarikTransaksiTokoDariSupabase, sinkronRingkasanToko).
+    transaksiTokoCache: [], // replika riwayat transaksi_toko (+item, dari kolom items jsonb) dari server, per lokasi
+    // transaksiItemCache: field lama (rincian per-produk dari view v_transaksi_item) -- sudah TIDAK dipakai
+    // lagi sejak daftarItemTransaksiToko() diubah menurunkan data ini lokal dari transaksiTokoCache saja
+    // (data yang sama persis, jadi tidak perlu ditarik dua kali lewat network). Dibiarkan di sini kosong
+    // supaya perangkat yang masih punya data lama di IndexedDB tidak error saat baca ulang.
+    transaksiItemCache: [],
+    ringkasanToko: null, // replika 1 baris v_ringkasan_toko (kas/modal/laba kumulatif) untuk lokasi ini
+    // Penanda apakah riwayat transaksi_toko sudah PERNAH ditarik penuh (semua baris) di perangkat ini.
+    // Sekali true, sinkron rutin berikutnya cukup jendela belakang saja (hemat kuota egress Supabase)
+    // -- lihat tarikTransaksiTokoDariSupabase.
+    riwayatTokoSudahFullSync: false
   };
 }
 async function loadDB(){
@@ -427,6 +435,9 @@ async function loadDB(){
       if(!data.transaksiTokoCache) data.transaksiTokoCache = [];
       if(!data.transaksiItemCache) data.transaksiItemCache = [];
       if(data.ringkasanToko === undefined) data.ringkasanToko = null;
+      // Kalau cache riwayat masih kosong (device baru/lama belum pernah sinkron), paksa full-sync
+      // sekali lagi walau flag ini kebetulan somehow sudah true -- jangan sampai laporan lama kosong.
+      data.riwayatTokoSudahFullSync = !!data.riwayatTokoSudahFullSync && data.transaksiTokoCache.length > 0;
       return data;
     }
   }catch(e){ console.error('Gagal membaca data', e); }
@@ -595,7 +606,11 @@ async function cobaSinkronSekarang(){
   // Antrean baru saja habis (semua tiket sukses terkirim, atau sisanya dipindah ke "Gagal") —
   // saatnya tarik ulang data produk & santri dari server, karena muatProdukDariSupabase /
   // muatSantriDariSupabase sengaja menolak menimpa data lokal selama antrean masih ada isinya.
-  if(antrean.length === 0 && navigator.onLine){
+  // bolehSegarkanOtomatis() membatasi ini maksimal sekali per JEDA_SEGARKAN_DATA_MS -- kalau ada
+  // banyak transaksi kecil tersinkron berturut-turut dalam waktu singkat, tidak perlu tarik ulang
+  // produk/santri/kas/riwayat SETIAP kali (stok & saldo lokal sudah benar duluan dari transaksi itu
+  // sendiri, jadi tarik ulang ini cuma penyelarasan berkala, bukan sesuatu yang mendesak).
+  if(antrean.length === 0 && navigator.onLine && bolehSegarkanOtomatis()){
     muatProdukDariSupabase().then(()=>{ if(document.querySelector('.nav button[data-page="produk"].active')) renderPage('produk'); });
     muatSantriDariSupabase();
     muatKasDariSupabase().then(()=>{ if(document.querySelector('.nav button[data-page="kas"].active')) renderPage('kas'); });
@@ -805,8 +820,21 @@ async function muatKasDariSupabase(){
   if(!navigator.onLine) return false;
   if(antrean.length > 0) return false; // sama seperti produk/santri: jangan tarik selama masih ada tiket kas yang menunggu dikirim
   try{
+    let queryMutasi = sb.from('kas_mutasi').select('id,lokasi,tanggal,arah,kategori,jumlah,catatan').eq('lokasi', lokasiToko);
+    // Sama seperti riwayat transaksi: kas_mutasi juga terus bertambah tanpa batas seiring waktu, jadi
+    // kalau sudah pernah ada catatan kas di HP ini, tidak perlu tarik ulang SEMUA baris tiap sinkron --
+    // cukup dari beberapa hari sebelum catatan terbaru yang sudah dikenal (buffer 7 hari, jaga-jaga ada
+    // catatan yang dientri mundur/telat). Baris yang sudah dikenal (by id) otomatis dilewati di bawah,
+    // jadi buffer lebar di sini aman, tidak akan menduplikasi.
+    if(state.kasMutasi.length > 0){
+      const tglTerbaru = state.kasMutasi.reduce((max,m)=> (!max || m.tanggal > max) ? m.tanggal : max, null);
+      if(tglTerbaru){
+        const buffer = new Date(new Date(tglTerbaru).getTime() - 7*24*60*60*1000).toISOString();
+        queryMutasi = queryMutasi.gte('tanggal', buffer);
+      }
+    }
     const [{ data: mutasiRows, error: errMutasi }, { data: pengaturanRow, error: errPengaturan }] = await Promise.all([
-      sb.from('kas_mutasi').select('id,lokasi,tanggal,arah,kategori,jumlah,catatan').eq('lokasi', lokasiToko),
+      queryMutasi,
       sb.from('pengaturan_kas').select('kas_awal,modal_awal').eq('lokasi', lokasiToko).maybeSingle()
     ]);
     if(errMutasi || errPengaturan){ console.error('Gagal memuat data kas dari Supabase', errMutasi||errPengaturan); return false; }
@@ -848,76 +876,68 @@ function mapTransaksiTokoDariSupabase(r){
     dariServer: true
   };
 }
-async function tarikTransaksiTokoDariSupabase(){
+// Jendela belakang (hari) yang selalu ditarik ulang tiap sinkron rutin, SETELAH full-sync pertama
+// pernah dilakukan. Transaksi yang lebih lama dari ini dianggap sudah "selesai" (tidak akan berubah
+// lagi) dan TIDAK ditarik ulang -- ini yang paling menghemat egress, karena tanpa ini setiap sinkron
+// (tiap buka app / tiap koneksi balik / tiap antrean habis terkirim) diam-diam download ULANG SELURUH
+// riwayat toko dari awal berdiri, padahal 99% isinya sama dengan yang sudah ada di HP.
+const HARI_JENDELA_SINKRON_RIWAYAT = 14;
+// Transaksi hutang yang BELUM lunas dikecualikan dari batas jendela di atas -- supaya kalau hutang lama
+// itu dilunasi/dibatalkan dari HP kasir lain, HP ini tetap ikut tahu begitu sinkron, walau umurnya
+// sudah lebih dari 14 hari. Begitu lunas/dibatalkan, transaksi itu otomatis "lepas" dari pengecualian
+// ini di sinkron berikutnya (tidak lagi belum_bayar), jadi tidak menumpuk terus-menerus.
+function batasWaktuSinkronRiwayat(){
+  const jendela = new Date(Date.now() - HARI_JENDELA_SINKRON_RIWAYAT*24*60*60*1000);
+  let batas = jendela;
+  state.transaksiTokoCache.forEach(t=>{
+    if(!t.dibatalkan && t.metode!=='tunai' && t.metode!=='saldo' && t.statusBayar==='belum_bayar' && t.tanggal){
+      const tgl = new Date(t.tanggal);
+      if(tgl < batas) batas = tgl;
+    }
+  });
+  return batas.toISOString();
+}
+async function tarikTransaksiTokoDariSupabase(paksaFull){
   if(!navigator.onLine) return false;
   if(antrean.length > 0) return false; // sama seperti data lain: jangan timpa cache selama masih ada tiket yang menunggu dikirim
+  const full = !!paksaFull || !state.riwayatTokoSudahFullSync;
   try{
-    // PENTING: sama seperti sinkronTransaksiItemToko, .limit(3000) di sini TIDAK cukup sendirian --
-    // Supabase API punya batas "Max Rows" per request (defaultnya 1000) yang diam-diam memotong hasil
-    // walau kita minta lebih banyak. Begitu transaksi_toko tembus 1000 baris, jumlah transaksi/Riwayat/
-    // Dashboard bakal ikut kepotong dengan cara yang sama seperti Laporan kalau tidak di-pagination.
+    // PENTING: .limit(3000) di sini TIDAK cukup sendirian -- Supabase API punya batas "Max Rows" per
+    // request (defaultnya 1000) yang diam-diam memotong hasil walau kita minta lebih banyak. Makanya
+    // ditarik per 1000 baris pakai .range() diulang terus sampai baris yang balik lebih sedikit dari
+    // batas per halaman. Kalau BUKAN full-sync, ini biasanya cuma butuh 1 halaman (data barunya sedikit).
     const HALAMAN = 1000;
+    let query = sb.from('transaksi_toko')
+      .select('id,santri_id,items,total,metode,status_bayar,lokasi,catatan,dicatat_oleh,client_id,created_at,dibatalkan,dibatalkan_pada,lunas_pada,santri:santri_id(nama)')
+      .eq('lokasi', lokasiToko);
+    if(!full) query = query.gte('created_at', batasWaktuSinkronRiwayat());
     let semua = [];
     for(let dari=0; ; dari+=HALAMAN){
-      const { data, error: errHeader } = await sb.from('transaksi_toko')
-        .select('id,santri_id,items,total,metode,status_bayar,lokasi,catatan,dicatat_oleh,client_id,created_at,dibatalkan,dibatalkan_pada,lunas_pada,santri:santri_id(nama)').eq('lokasi', lokasiToko).order('created_at', { ascending:false })
-        .range(dari, dari+HALAMAN-1);
+      const { data, error: errHeader } = await query.order('created_at', { ascending:false }).range(dari, dari+HALAMAN-1);
       if(errHeader){ console.error('Gagal menarik riwayat transaksi_toko', errHeader); return false; }
       semua = semua.concat(data||[]);
       if(!data || data.length < HALAMAN) break;
       if(semua.length > 200000) break; // pengaman ekstra, jangan sampai loop tanpa henti
     }
-    state.transaksiTokoCache = semua.map(mapTransaksiTokoDariSupabase);
+    const hasilBaru = semua.map(mapTransaksiTokoDariSupabase);
+    if(full){
+      state.transaksiTokoCache = hasilBaru;
+      state.riwayatTokoSudahFullSync = true;
+    } else {
+      // Gabung (upsert by id) ke cache yang sudah ada -- baris lama di luar jendela TIDAK disentuh.
+      const peta = new Map(state.transaksiTokoCache.map(t=>[t.id, t]));
+      hasilBaru.forEach(t=>peta.set(t.id, t));
+      state.transaksiTokoCache = Array.from(peta.values());
+    }
     saveDB();
     return true;
   }catch(e){ console.error('Gagal menarik riwayat transaksi_toko', e); return false; }
 }
 
-/* ============ SINKRON v_transaksi_item (RINCIAN PER PRODUK TERJUAL) ============
-   View ini sudah memekarkan kolom items (jsonb) di transaksi_toko jadi satu baris per produk,
-   dipakai khusus untuk Laporan (rincian laba per produk, produk terlaris, grafik) supaya angkanya
-   pasti sama dengan yang dihitung aplikasi lain yang membaca view yang sama — bukan dihitung ulang di JS. */
-function mapTransaksiItemDariSupabase(r){
-  return {
-    // v_transaksi_item tidak punya kolom client_id, jadi transaksiClientId selalu null di sini —
-    // itu tidak masalah karena view ini cuma dipakai untuk rincian laba per produk (bukan untuk
-    // mencocokkan status batal/lunas terbaru, itu tugas daftarTransaksiToko/transaksiTokoCache).
-    transaksiId: r.transaksi_id, transaksiClientId: r.client_id || null,
-    tanggal: r.created_at, lokasi: r.lokasi,
-    metode: r.metode==='Saldo' ? 'saldo' : r.metode==='Hutang' ? 'hutang' : r.metode==='Campuran' ? 'campuran' : 'tunai',
-    statusBayar: r.status_bayar, dibatalkan: !!r.dibatalkan,
-    produkId: r.produk_id, namaProduk: r.nama_produk,
-    hargaJual: Number(r.harga_jual)||0, hargaBeli: Number(r.harga_beli)||0, qty: Number(r.qty)||0
-  };
-}
-async function sinkronTransaksiItemToko(){
-  if(!navigator.onLine) return false;
-  if(antrean.length > 0) return false;
-  try{
-    // PENTING: Supabase API punya batas "Max Rows" (defaultnya 1000) PER REQUEST, terpisah dari
-    // .limit() yang kita minta di kode. Kalau baris di v_transaksi_item sudah lebih dari 1000, request
-    // sekali jalan diam-diam cuma balikin 1000 baris teratas walau kita minta limit(20000) -- dan
-    // karena diurutkan dari TERBARU, yang hilang adalah data paling LAMA (persis penyebab Omzet di
-    // Laporan untuk tanggal lama jadi Rp0, walau jumlah transaksinya tetap benar). Makanya di sini
-    // kita tarik per 1000 baris pakai .range() diulang terus sampai baris yang balik lebih sedikit
-    // dari batas per halaman -- artinya sudah sampai halaman terakhir, apapun total barisnya.
-    const HALAMAN = 1000;
-    let semua = [];
-    for(let dari=0; ; dari+=HALAMAN){
-      const { data, error } = await sb.from('v_transaksi_item')
-        .select('transaksi_id,client_id,lokasi,metode,status_bayar,dibatalkan,created_at,produk_id,nama_produk,qty,harga_jual,harga_beli')
-        .eq('lokasi', lokasiToko).order('created_at', { ascending:false })
-        .range(dari, dari+HALAMAN-1);
-      if(error){ console.error('Gagal sinkron v_transaksi_item', error); return false; }
-      semua = semua.concat(data||[]);
-      if(!data || data.length < HALAMAN) break; // halaman terakhir sudah tercapai
-      if(semua.length > 200000) break; // pengaman ekstra, jangan sampai loop tanpa henti
-    }
-    state.transaksiItemCache = semua.map(mapTransaksiItemDariSupabase);
-    saveDB();
-    return true;
-  }catch(e){ console.error('Gagal sinkron v_transaksi_item', e); return false; }
-}
+// CATATAN: dulu di sini ada sinkronTransaksiItemToko() yang menarik rincian per-produk dari view
+// v_transaksi_item lewat network terpisah. Sudah dihapus -- rincian itu sekarang diturunkan LOKAL
+// dari transaksiTokoCache (lihat daftarItemTransaksiToko() di bawah), karena datanya persis sama
+// dengan kolom items (jsonb) yang sudah ikut tertarik lewat tarikTransaksiTokoDariSupabase().
 
 /* ============ SINKRON v_ringkasan_toko (KAS/MODAL/LABA KUMULATIF) ============
    View ini menghitung Saldo Kas, Nilai Stok, Piutang, Laba Kumulatif, dan Modal langsung di server
@@ -951,10 +971,12 @@ async function sinkronRingkasanToko(){
   }catch(e){ console.error('Gagal sinkron v_ringkasan_toko', e); return false; }
 }
 
-// Jalankan ketiga sinkron di atas sekaligus — dipanggil saat boot, saat koneksi kembali, dan setelah
+// Jalankan kedua sinkron di atas sekaligus — dipanggil saat boot, saat koneksi kembali, dan setelah
 // tiap kali transaksi/kas selesai dikirim ke server (lihat cobaSinkronSekarang & prosesTiket).
-async function sinkronRingkasanDanRiwayatToko(){
-  await Promise.all([ tarikTransaksiTokoDariSupabase(), sinkronTransaksiItemToko(), sinkronRingkasanToko() ]);
+// CATATAN: rincian per-item (dulu ditarik terpisah dari v_transaksi_item) sekarang diturunkan lokal
+// dari transaksiTokoCache -- lihat daftarItemTransaksiToko() -- jadi tidak perlu ditarik lagi di sini.
+async function sinkronRingkasanDanRiwayatToko(paksaFull){
+  await Promise.all([ tarikTransaksiTokoDariSupabase(paksaFull), sinkronRingkasanToko() ]);
   if(document.querySelector('.nav button[data-page="dashboard"].active')) renderPage('dashboard');
   if(document.querySelector('.nav button[data-page="kas"].active')) renderPage('kas');
   if(document.querySelector('.nav button[data-page="laporan"].active')) renderPage('laporan');
@@ -982,33 +1004,23 @@ function daftarTransaksiToko(){
   const belumSinkron = state.transaksi.filter(t=> t.tipe==='jual' && !idClientDiCache.has(t.clientId));
   return [...hasil, ...belumSinkron];
 }
+// Rincian per-produk terjual (dipakai Laporan) diturunkan LANGSUNG dari daftarTransaksiToko() di
+// memori -- BUKAN dari query terpisah ke server. Kolom items (jsonb) di transaksi_toko sudah memuat
+// produk/harga/qty per baris untuk tiap transaksi, jadi menarik ulang v_transaksi_item lewat network
+// cuma mendownload data yang PERSIS SAMA sekali lagi (dua kali lipat egress untuk data yang sama).
 function daftarItemTransaksiToko(){
-  const cache = state.transaksiItemCache || [];
-  const localByClientId = {};
-  state.transaksi.forEach(t=>{ if(t.tipe==='jual' && t.clientId) localByClientId[t.clientId] = t; });
-  // Sama seperti daftarTransaksiToko: status batal/lunas belum disinkron ke server, jadi catatan
-  // lokal (kalau ada & beda) yang dipakai untuk baris item dari cache milik transaksi yang sama.
-  const hasil = cache.map(i=>{
-    const lokal = i.transaksiClientId ? localByClientId[i.transaksiClientId] : null;
-    if(lokal && (lokal.dibatalkan !== i.dibatalkan || lokal.statusBayar !== i.statusBayar)){
-      return { ...i, dibatalkan: !!lokal.dibatalkan, statusBayar: lokal.statusBayar };
-    }
-    return i;
-  });
-  const idDiCache = new Set(cache.map(x=>x.transaksiClientId).filter(Boolean));
-  const itemBelumSinkron = [];
-  state.transaksi.forEach(t=>{
-    if(t.tipe!=='jual' || idDiCache.has(t.clientId)) return;
-    t.items.forEach(i=>{
-      itemBelumSinkron.push({
-        transaksiId:null, transaksiClientId: t.clientId, tanggal:t.tanggal, lokasi:t.lokasi||lokasiToko,
+  const hasil = [];
+  daftarTransaksiToko().forEach(t=>{
+    (t.items||[]).forEach(i=>{
+      hasil.push({
+        transaksiId: t.dariServer ? t.id : null, transaksiClientId: t.clientId||null, tanggal:t.tanggal, lokasi:t.lokasi||lokasiToko,
         metode:t.metode, statusBayar:t.statusBayar, dibatalkan: !!t.dibatalkan,
         produkId:i.produkId, namaProduk:i.nama, hargaJual:i.harga, hargaBeli:i.hargaBeli||0,
         qty: i.qty*(i.pcsPerSatuan||1)
       });
     });
   });
-  return [...hasil, ...itemBelumSinkron];
+  return hasil;
 }
 // Cache v_ringkasan_toko dianggap "siap pakai" hanya kalau sudah pernah ditarik DAN tidak ada tiket
 // yang masih menunggu dikirim (kalau masih ada antrean, angka di server belum termasuk perubahan itu).
@@ -1016,7 +1028,31 @@ function cacheRingkasanSiapPakai(){
   return !!state.ringkasanToko && antrean.length === 0;
 }
 
-window.addEventListener('online', cobaSinkronSekarang);
+// Jeda minimum antar sinkron OTOMATIS (produk/santri/kas/riwayat) -- mencegah sinyal yang naik-turun
+// (banyak event 'online' dalam waktu singkat) memicu tarik-ulang data berkali-kali padahal datanya
+// belum tentu berubah. Refresh yang DISENGAJA pengguna (tombol Refresh, habis login) TIDAK dibatasi
+// jeda ini -- lihat pemakaian bolehSegarkanOtomatis() vs pemanggilan langsung di refreshData()/login.
+let waktuTerakhirSegarkanData = 0;
+const JEDA_SEGARKAN_DATA_MS = 3*60*1000; // 3 menit
+function bolehSegarkanOtomatis(){
+  const sekarang = Date.now();
+  if(sekarang - waktuTerakhirSegarkanData < JEDA_SEGARKAN_DATA_MS) return false;
+  waktuTerakhirSegarkanData = sekarang;
+  return true;
+}
+// Satu-satunya listener 'online' untuk seluruh app (dulu ada 2 listener terpisah yang masing-masing
+// narik ulang produk/santri/kas/riwayat sendiri-sendiri tiap kali koneksi balik -- otomatis dobel
+// network request setiap reconnect). Sekarang digabung jadi satu, dengan jeda minimum di atas.
+window.addEventListener('online', async ()=>{
+  await cobaSinkronSekarang(); // selalu coba kirim dulu tiket yang masih menunggu -- ini murah/tanpa network kalau antrean sudah kosong
+  if(bolehSegarkanOtomatis()){
+    toast('Koneksi kembali — menyinkronkan data...');
+    muatProdukDariSupabase().then(()=>{ if(document.querySelector('.nav button[data-page="produk"].active')) renderPage('produk'); });
+    muatSantriDariSupabase();
+    muatKasDariSupabase().then(()=>{ if(document.querySelector('.nav button[data-page="kas"].active')) renderPage('kas'); });
+    sinkronRingkasanDanRiwayatToko();
+  }
+});
 setInterval(cobaSinkronSekarang, 30*1000); // jaga-jaga kalau event 'online' tidak selalu terdeteksi tepat waktu
 
 /* ============ SINKRON PRODUK DENGAN SUPABASE ============
@@ -1129,6 +1165,7 @@ function mintaLogin(onSuccess, setiapKlik){
     // — bukan menunggu tombol Refresh ditekan manual.
     if(navigator.onLine){
       toast('Menyinkronkan data...');
+      bolehSegarkanOtomatis(); // tandai baru saja sinkron, supaya listener 'online' yang mungkin ikut nyala tidak menarik ulang lagi detik ini juga
       await Promise.all([
         muatProdukDariSupabase(),
         muatSantriDariSupabase(),
@@ -1233,11 +1270,15 @@ async function refreshData(){
     return;
   }
   toast('Memuat ulang data...');
+  bolehSegarkanOtomatis(); // tandai baru saja sinkron manual, supaya listener 'online' tidak ikut menarik ulang lagi kalau kebetulan nyala berdekatan
   await cobaSinkronSekarang(); // kirim dulu tiket yang masih menunggu, supaya urutan data tetap benar
   const [okSantri, okProduk, okKas] = await Promise.all([
     muatSantriDariSupabase(), muatProdukDariSupabase(), muatKasDariSupabase()
   ]);
-  await sinkronRingkasanDanRiwayatToko();
+  // Tombol Refresh ditekan manual = jarang & disengaja pengguna, jadi dijadikan "jalan aman" full
+  // resync riwayat transaksi (bukan cuma jendela belakang) -- jaga-jaga ada perubahan lama dari HP
+  // kasir lain di luar jendela HARI_JENDELA_SINKRON_RIWAYAT yang belum sempat ke-tangkap otomatis.
+  await sinkronRingkasanDanRiwayatToko(true);
   const halamanAktif = halamanSaatIni;
   if(halamanAktif && pages[halamanAktif]) renderPage(halamanAktif);
   perbaruiBadgeStokMenipis();
@@ -3527,7 +3568,12 @@ async function bootApp(){
   perbaruiBadgeAntrean();
   cekBackupOtomatis();
   setInterval(cekBackupOtomatis, 60*1000); // cek tiap menit selama aplikasi terbuka
-  // Coba sinkron antrean lama dulu (urutannya harus duluan), baru tarik data produk terbaru dari server
+  // Coba sinkron antrean lama dulu (urutannya harus duluan), baru tarik data produk terbaru dari server.
+  // Sinkron awal ini SENGAJA selalu jalan penuh (tidak kena jeda bolehSegarkanOtomatis) -- baru buka
+  // app wajar untuk langsung tarik data terbaru. Tapi tetap "cap" jamnya di sini, supaya KALAU pas
+  // buka app internetnya baru nyambung barengan (event 'online' ikut nyala di momen yang sama), listener
+  // 'online' terpadu (lihat dekat cobaSinkronSekarang) tidak ikut narik ulang detik itu juga.
+  bolehSegarkanOtomatis();
   await cobaSinkronSekarang();
   if(await muatProdukDariSupabase()){
     if(document.querySelector('.nav button[data-page="produk"].active')) renderPage('produk');
@@ -3535,11 +3581,8 @@ async function bootApp(){
   await muatSantriDariSupabase();
   await muatKasDariSupabase();
   await sinkronRingkasanDanRiwayatToko();
-  window.addEventListener('online', ()=>{
-    toast('Koneksi kembali — menyinkronkan data...');
-    muatProdukDariSupabase(); muatSantriDariSupabase(); muatKasDariSupabase();
-    sinkronRingkasanDanRiwayatToko();
-  });
+  // Listener 'online' TIDAK didaftarkan lagi di sini -- sudah ada satu listener terpadu (dengan jeda
+  // minimum antar sinkron otomatis) yang didaftarkan sekali di dekat definisi cobaSinkronSekarang.
 }
 bootApp();
 
