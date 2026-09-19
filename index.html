@@ -916,19 +916,71 @@ function mapKasMutasiDariSupabase(r){
 // Tarik kas_mutasi & pengaturan_kas (kas awal/modal awal) dari server dan GABUNGKAN ke data lokal
 // (bukan menimpa total) — supaya baris yang sudah ada di HP lain / sebelum fitur ini ada tetap aman,
 // dan restorasi di HP baru / sesudah data lokal hilang tetap bisa menarik riwayat dari server.
-async function muatKasDariSupabase(){
+function kunciCursorKasMutasi(){ return 'cursorKasMutasi::' + lokasiToko; }
+function kunciFullResyncKasMutasi(){ return 'fullResyncKasMutasi::' + lokasiToko; }
+const FULL_RESYNC_KAS_MUTASI_MS = 24*60*60*1000; // 24 jam -- jaring pengaman untuk baris kas yang dihapus di server
+const TUMPANG_DELTA_KAS_MUTASI_MS = 2*60*1000;   // sama alasannya seperti TUMPANG_DELTA_PRODUK_MS di atas
+function cursorDenganTumpangKasMutasi(cursor){
+  const t = Date.parse(cursor);
+  if(isNaN(t)) return cursor;
+  return new Date(t - TUMPANG_DELTA_KAS_MUTASI_MS).toISOString();
+}
+const KOLOM_KAS_MUTASI = 'id,lokasi,tanggal,arah,kategori,jumlah,catatan,updated_at';
+
+/* PERBAIKAN -- sebelumnya fungsi ini menarik SELURUH riwayat kas_mutasi
+   dari awal berdiri toko, setiap kali dipanggil (tiap 10 menit lewat
+   pullFallbackTimer, DAN tiap kali tab dibuka lagi) -- padahal baris yang
+   BENAR-BENAR baru cuma sedikit. Beda dengan santri/produk yang jumlah
+   barisnya relatif tetap, kas_mutasi itu BUKU BESAR yang terus bertambah,
+   jadi biaya tarik-ulang-total ini akan makin membengkak seiring waktu,
+   bukan cuma sekali. Sekarang dipakai pola delta yang sama seperti
+   muatProdukDariSupabase() di atas: sync PENUH cuma sekali/24 jam (jaring
+   pengaman kalau ada baris yang dihapus di server), di luar itu cuma
+   tarik baris yang updated_at-nya baru (delta), lalu digabung (upsert by
+   id) ke cache lokal -- BUKAN diganti total, supaya baris lama yang sudah
+   ada tetap dipertahankan. */
+async function muatKasDariSupabase(opts){
   if(!navigator.onLine) return false;
   if(antrean.length > 0) return false; // sama seperti produk/santri: jangan tarik selama masih ada tiket kas yang menunggu dikirim
+  opts = opts || {};
   try{
-    const [{ data: mutasiRows, error: errMutasi }, { data: pengaturanRow, error: errPengaturan }] = await Promise.all([
-      ambilSemuaHalaman(()=>sb.from('kas_mutasi').select('id,lokasi,tanggal,arah,kategori,jumlah,catatan').eq('lokasi', lokasiToko).order('id')),
-      sb.from('pengaturan_kas').select('kas_awal,modal_awal').eq('lokasi', lokasiToko).maybeSingle()
-    ]);
-    if(errMutasi || errPengaturan){ console.error('Gagal memuat data kas dari Supabase', errMutasi||errPengaturan); return false; }
-    const idLokalYangAda = new Set(state.kasMutasi.map(m=>m.id));
-    (mutasiRows||[]).forEach(r=>{
-      if(!idLokalYangAda.has(r.id)){ state.kasMutasi.push(mapKasMutasiDariSupabase(r)); idLokalYangAda.add(r.id); }
-    });
+    const { data: pengaturanRow, error: errPengaturan } = await sb.from('pengaturan_kas')
+      .select('kas_awal,modal_awal').eq('lokasi', lokasiToko).maybeSingle();
+    if(errPengaturan){ console.error('Gagal memuat pengaturan kas dari Supabase', errPengaturan); return false; }
+
+    const cursorKey = kunciCursorKasMutasi();
+    const fullKey = kunciFullResyncKasMutasi();
+    const cursor = await idbGet(cursorKey);
+    const lastFull = await idbGet(fullKey);
+    const dueForFull = opts.forceFull || !cursor || !lastFull || (Date.now() - Number(lastFull) > FULL_RESYNC_KAS_MUTASI_MS);
+
+    if(dueForFull){
+      const { data, error } = await ambilSemuaHalaman(()=>sb.from('kas_mutasi')
+        .select(KOLOM_KAS_MUTASI).eq('lokasi', lokasiToko).order('updated_at', { ascending:true }).order('id', { ascending:true }));
+      if(error){ console.error('Gagal memuat data kas dari Supabase (full)', error); return false; }
+      state.kasMutasi = unikByKunci(data||[], 'id').map(mapKasMutasiDariSupabase);
+      let maxUpdated = null;
+      (data||[]).forEach(r=>{ if(r.updated_at && (!maxUpdated || r.updated_at > maxUpdated)) maxUpdated = r.updated_at; });
+      await idbSet(cursorKey, maxUpdated || new Date(0).toISOString());
+      await idbSet(fullKey, String(Date.now()));
+    } else {
+      // Delta: cuma baris yang updated_at-nya lebih baru dari cursor -- gabungkan (upsert by id)
+      // ke riwayat kas yang sudah ada, BUKAN menarik ulang semuanya.
+      const batasBawah = cursorDenganTumpangKasMutasi(cursor);
+      const { data, error } = await ambilSemuaHalaman(()=>sb.from('kas_mutasi')
+        .select(KOLOM_KAS_MUTASI).eq('lokasi', lokasiToko).gt('updated_at', batasBawah)
+        .order('updated_at', { ascending:true }).order('id', { ascending:true }));
+      if(error){ console.error('Gagal memuat data kas dari Supabase (delta)', error); return false; }
+      if(data && data.length){
+        const byId = new Map((state.kasMutasi||[]).map(m=>[m.id, m]));
+        data.forEach(r=>{ byId.set(r.id, mapKasMutasiDariSupabase(r)); });
+        state.kasMutasi = Array.from(byId.values());
+        let maxUpdated = cursor;
+        data.forEach(r=>{ if(r.updated_at && r.updated_at > maxUpdated) maxUpdated = r.updated_at; });
+        await idbSet(cursorKey, maxUpdated);
+      }
+    }
+
     if(pengaturanRow){
       state.kasAwal = Number(pengaturanRow.kas_awal)||0;
       state.modalAwal = Number(pengaturanRow.modal_awal)||0;
