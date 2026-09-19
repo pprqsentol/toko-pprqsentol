@@ -1334,15 +1334,26 @@ function mintaLogin(onSuccess, setiapKlik){
     // saat masih anon (RLS menolak), state lokal masih 0/kosong walau sekarang sudah login.
     // Tarik ulang semuanya dulu sebelum merender halaman yang diminta, supaya angkanya langsung benar
     // — bukan menunggu tombol Refresh ditekan manual.
+    // PENTING (perbaikan bug "stuck setelah login"): kalau salah satu dari proses sinkron di bawah ini
+    // gagal/reject (mis. koneksi terputus di tengah jalan, error dari server, dll), JANGAN sampai itu
+    // menggagalkan onSuccess() juga — sebelumnya Promise.all tanpa try/catch bikin SELURUH proses ini
+    // berhenti diam-diam kalau salah satu gagal, jadi onSuccess() (yang pindah ke halaman tujuan)
+    // tidak pernah terpanggil: modal login sudah tertutup tapi halaman tidak pernah berpindah —
+    // persis seperti "macet setelah login, menu bisa diklik tapi tidak masuk ke halamannya".
     if(navigator.onLine){
       toast('Menyinkronkan data...');
-      await Promise.all([
-        muatProdukDariSupabase(),
-        muatSantriDariSupabase(),
-        muatKasDariSupabase(),
-        sinkronRingkasanDanRiwayatToko()
-      ]);
-      restartRealtimeSubscriptions(); // sesi baru saja berubah dari anon -> authenticated, sambung ulang dengan sesi ini
+      try{
+        await Promise.all([
+          muatProdukDariSupabase(),
+          muatSantriDariSupabase(),
+          muatKasDariSupabase(),
+          sinkronRingkasanDanRiwayatToko()
+        ]);
+        restartRealtimeSubscriptions(); // sesi baru saja berubah dari anon -> authenticated, sambung ulang dengan sesi ini
+      }catch(e){
+        console.error('Gagal menyinkronkan sebagian data setelah login (halaman tetap dibuka pakai data lokal)', e);
+        toast('⚠️ Sebagian data gagal disinkron, memakai data lokal dulu');
+      }
     }
     onSuccess && onSuccess();
   };
@@ -1456,10 +1467,31 @@ document.getElementById('btnRefresh').addEventListener('click', refreshData);
 
 /* ============ LOGOUT ============ */
 async function logout(){
-  if(!confirm('Keluar dari sesi ini? Anda perlu login lagi untuk memakai aplikasi.')) return;
+  if(!confirm('Keluar dari sesi ini dan tutup aplikasi?')) return;
   try{ await sb.auth.signOut(); }catch(e){ console.error('Gagal logout dari Supabase', e); }
   sesiMasuk = false;
-  location.reload();
+  tutupAplikasiSetelahLogout();
+}
+// Catatan penting soal window.close(): demi keamanan, browser modern HANYA mengizinkan
+// halaman menutup dirinya sendiri lewat window.close() kalau tab/jendela itu tadinya
+// dibuka lewat script (window.open). Untuk aplikasi yang dibuka biasa (lewat alamat,
+// bookmark, atau ikon PWA di layar HP), window.close() akan DIABAIKAN begitu saja oleh
+// browser — tidak ada error, cuma tidak terjadi apa-apa. Jadi di sini kita tetap coba
+// window.close() (kadang berhasil, terutama di sebagian WebView/PWA), TAPI kalau ternyata
+// halamannya masih terbuka setelah dicoba, tampilkan layar "sudah keluar" supaya pengguna
+// tahu sesinya sudah benar-benar logout dan tinggal menutup aplikasinya sendiri secara manual
+// (swipe/tombol keluar di HP) — bukan malah diam-diam memuat ulang balik ke aplikasi yang aktif.
+function tutupAplikasiSetelahLogout(){
+  try{ window.close(); }catch(e){}
+  setTimeout(()=>{
+    document.body.innerHTML = `
+      <div style="min-height:100vh;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:14px;padding:24px;text-align:center;background:var(--bg,#F2F6FB);font-family:inherit;">
+        <div style="font-size:48px;">🚪</div>
+        <div style="font-size:17px;font-weight:700;color:var(--text,#1E2A32);">Anda sudah keluar</div>
+        <div style="font-size:13.5px;color:var(--muted,#7C8A94);max-width:280px;">Sesi login sudah ditutup. Silakan tutup aplikasi ini secara manual (browser tidak mengizinkan aplikasi menutup dirinya sendiri secara otomatis).</div>
+        <button type="button" onclick="location.reload()" style="margin-top:8px;padding:10px 18px;border:none;border-radius:12px;background:var(--primary,#0EA5A0);color:#fff;font-weight:600;font-size:13.5px;">Masuk lagi</button>
+      </div>`;
+  }, 250);
 }
 document.getElementById('btnLogout').addEventListener('click', logout);
 document.getElementById('btnBack').addEventListener('click', ()=>history.back());
