@@ -642,7 +642,7 @@ async function cobaSinkronSekarang(){
    perubahan di server, event itu yang memicu pull -- bukan timer tetap. PULL_FALLBACK_MS di bawah
    cuma jaring pengaman kalau koneksi realtime terputus.
    Prinsip "jangan timpa cache selama antrean masih ada isi" (supaya urutan data tidak kacau) tetap
-   dijaga penuh -- lihat masing-masing fungsi muat*/tarik*/sinkron* yang sudah punya guard itu. */
+   dijaga penuh -- lihat masing-masing fungsi muat, tarik, sinkron yang sudah punya guard itu. */
 const PULL_FALLBACK_MS = 600000;   // 10 menit: jaring pengaman, bukan pemicu utama
 const REALTIME_DEBOUNCE_MS = 2000; // gabungkan beberapa event yang datang beruntun jadi 1 pull
 
