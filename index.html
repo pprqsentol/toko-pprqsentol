@@ -1186,19 +1186,74 @@ function mapProdukDariSupabase(r){
     aktif: r.aktif !== false
   };
 }
-async function muatProdukDariSupabase(){
+/* ============ CURSOR SINKRON produk (delta sync, sama pola dengan transaksi_toko) ============
+   Sebelum ini, SETIAP kali ada perubahan produk (termasuk cuma stok berkurang 1 karena 1 transaksi
+   kasir) HP ini menarik ULANG SELURUH daftar produk (ratusan baris) dari server -- padahal yang
+   berubah cuma 1-2 baris. Di sini kita simpan "cursor" (updated_at produk terbaru yang sudah kita
+   punya) per lokasi, supaya pull berikutnya cukup minta baris yang updated_at-nya lebih baru saja.
+   Produk yang DIHAPUS di server tidak langsung hilang lewat delta (baris yang hilang tidak
+   "muncul" di hasil delta) -- makanya tetap ada full resync berkala (24 jam) sebagai jaring
+   pengaman, PERSIS seperti pola yang sudah dipakai & terbukti aman di tarikTransaksiTokoDariSupabase. */
+function kunciCursorProduk(){ return 'cursorProduk::' + lokasiToko; }
+function kunciFullResyncProduk(){ return 'fullResyncProduk::' + lokasiToko; }
+const FULL_RESYNC_PRODUK_MS = 24*60*60*1000; // 24 jam -- jaring pengaman untuk produk yang dihapus di server
+const TUMPANG_DELTA_PRODUK_MS = 2*60*1000;   // sama alasannya seperti TUMPANG_DELTA_TRANSAKSI_TOKO_MS di atas
+function cursorDenganTumpangProduk(cursor){
+  const t = Date.parse(cursor);
+  if(isNaN(t)) return cursor;
+  return new Date(t - TUMPANG_DELTA_PRODUK_MS).toISOString();
+}
+const KOLOM_PRODUK = 'id,nama,kategori,barcode,harga_beli,harga_jual,stok,harga_grosir,qty_grosir,nama_satuan_besar,isi_satuan_besar,harga_satuan_besar,aktif,updated_at';
+// Query ke server sekarang diurutkan by updated_at (perlu untuk delta), BUKAN by nama lagi -- jadi
+// urutan tampil (A-Z seperti sebelumnya) dirapikan di sini, di sisi aplikasi, supaya daftar Produk
+// tetap tampil alfabetis persis seperti sebelum perubahan delta sync ini.
+function urutkanProduk(list){
+  return list.slice().sort((a,b)=> a.nama.localeCompare(b.nama) || String(a.id).localeCompare(String(b.id)));
+}
+
+async function muatProdukDariSupabase(opts){
   if(!navigator.onLine) return false; // biarkan pakai data cache lokal apa adanya
   // Sama seperti muatSantriDariSupabase: jangan timpa stok produk lokal kalau masih ada tiket
   // (mis. transaksi/edit produk) yang menunggu dikirim — supaya stok yang ditampilkan tidak
   // "kembali" ke angka lama sebelum transaksi yang masih tertunda itu benar-benar sinkron.
   if(antrean.length > 0) return false;
-  const { data, error } = await ambilSemuaHalaman(()=>sb.from('produk')
-    .select('id,nama,kategori,barcode,harga_beli,harga_jual,stok,harga_grosir,qty_grosir,nama_satuan_besar,isi_satuan_besar,harga_satuan_besar,aktif')
-    .eq('lokasi', lokasiToko).order('nama').order('id'));
-  if(error){ console.error('Gagal memuat produk dari Supabase', error); return false; }
-  state.produk = unikByKunci(data, 'id').map(mapProdukDariSupabase);
-  saveDB();
-  return true;
+  opts = opts || {};
+  try{
+    const cursorKey = kunciCursorProduk();
+    const fullKey = kunciFullResyncProduk();
+    const cursor = await idbGet(cursorKey);
+    const lastFull = await idbGet(fullKey);
+    const dueForFull = opts.forceFull || !cursor || !lastFull || (Date.now() - Number(lastFull) > FULL_RESYNC_PRODUK_MS);
+
+    if(dueForFull){
+      const { data, error } = await ambilSemuaHalaman(()=>sb.from('produk')
+        .select(KOLOM_PRODUK).eq('lokasi', lokasiToko).order('updated_at', { ascending:true }).order('id', { ascending:true }));
+      if(error){ console.error('Gagal memuat produk dari Supabase (full)', error); return false; }
+      state.produk = urutkanProduk(unikByKunci(data, 'id').map(mapProdukDariSupabase));
+      let maxUpdated = null;
+      (data||[]).forEach(r=>{ if(r.updated_at && (!maxUpdated || r.updated_at > maxUpdated)) maxUpdated = r.updated_at; });
+      await idbSet(cursorKey, maxUpdated || new Date(0).toISOString());
+      await idbSet(fullKey, String(Date.now()));
+    } else {
+      // Delta: cuma baris yang updated_at-nya lebih baru dari cursor -- gabungkan (upsert by id)
+      // ke daftar produk yang sudah ada, BUKAN menimpa semuanya.
+      const batasBawah = cursorDenganTumpangProduk(cursor);
+      const { data, error } = await ambilSemuaHalaman(()=>sb.from('produk')
+        .select(KOLOM_PRODUK).eq('lokasi', lokasiToko).gt('updated_at', batasBawah)
+        .order('updated_at', { ascending:true }).order('id', { ascending:true }));
+      if(error){ console.error('Gagal memuat produk dari Supabase (delta)', error); return false; }
+      if(data && data.length){
+        const byId = new Map((state.produk||[]).map(p=>[p.id, p]));
+        data.forEach(r=>{ byId.set(r.id, mapProdukDariSupabase(r)); });
+        state.produk = urutkanProduk(Array.from(byId.values()));
+        let maxUpdated = cursor;
+        data.forEach(r=>{ if(r.updated_at && r.updated_at > maxUpdated) maxUpdated = r.updated_at; });
+        await idbSet(cursorKey, maxUpdated);
+      }
+    }
+    saveDB();
+    return true;
+  }catch(e){ console.error('Gagal memuat produk dari Supabase', e); return false; }
 }
 
 // Diisi nilai sebenarnya oleh bootApp() di bagian INIT (paling bawah) setelah IndexedDB siap dibaca.

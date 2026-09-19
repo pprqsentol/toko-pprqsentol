@@ -1,4 +1,4 @@
-const CACHE_NAME = 'kasir-toko-v56-delta-tumpang-tindih';
+const CACHE_NAME = 'kasir-toko-v57-delta-produk';
 const ASSETS = [
   './',
   './index.html',
