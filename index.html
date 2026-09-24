@@ -416,7 +416,15 @@ function bentukAwalState(){
     // andai HP hilang/direset (lihat tarikTransaksiTokoDariSupabase, sinkronRingkasanToko).
     transaksiTokoCache: [], // replika riwayat transaksi_toko (+item) dari server, per lokasi
     transaksiItemCache: [], // replika baris v_transaksi_item (per produk terjual) dari server, per lokasi
-    ringkasanToko: null // replika 1 baris v_ringkasan_toko (kas/modal/laba kumulatif) untuk lokasi ini
+    ringkasanToko: null, // replika 1 baris v_ringkasan_toko (kas/modal/laba kumulatif) untuk lokasi ini
+    // PERUBAHAN (optimasi egress): dua cache mentah di bawah ini jadi "basis" untuk delta sync
+    // santri & saldo (lihat muatSantriDariSupabase). anggotaSemua menyimpan SEMUA santri apa adanya
+    // (termasuk yang tidak aktif) supaya perubahan status aktif ikut kedeteksi; anggota (dipakai UI)
+    // tetap cuma yang aktif, diturunkan dari sini tiap kali sinkron. transaksiSaldoCache menyimpan
+    // baris transaksi_saldo mentah, dipakai buat menghitung saldo sendiri (gantinya narik view
+    // saldo_santri yang selalu dihitung ulang penuh tiap query).
+    anggotaSemua: [],
+    transaksiSaldoCache: []
   };
 }
 async function loadDB(){
@@ -427,6 +435,8 @@ async function loadDB(){
       if(!data.transaksiTokoCache) data.transaksiTokoCache = [];
       if(!data.transaksiItemCache) data.transaksiItemCache = [];
       if(data.ringkasanToko === undefined) data.ringkasanToko = null;
+      if(!data.anggotaSemua) data.anggotaSemua = [];
+      if(!data.transaksiSaldoCache) data.transaksiSaldoCache = [];
       return data;
     }
   }catch(e){ console.error('Gagal membaca data', e); }
@@ -488,7 +498,32 @@ function unikByKunci(rows, kunci){
   return Array.from(m.values());
 }
 
-/* ============ SINKRON DATA SANTRI (dari Aplikasi Pondok, read-only) ============ */
+/* ============ SINKRON DATA SANTRI (dari Aplikasi Pondok, read-only) ============
+   PERUBAHAN (optimasi egress, lihat diskusi): sebelumnya santri & saldo ditarik PENUH
+   setiap fungsi ini dipanggil (tiap 10 menit + tiap kali tab dibuka lagi) -- ini yang
+   paling banyak makan kuota Supabase project ini. Sekarang dipecah jadi 2 delta sync
+   terpisah, polanya sama persis dengan produk/kas_mutasi di atas:
+   1. `santri` -- tabel aslinya sudah punya updated_at, jadi didelta biasa. Query TIDAK
+      lagi difilter eq('aktif', true) supaya santri yang BERUBAH jadi tidak aktif ikut
+      kedeteksi (kalau tetap difilter, delta yang cuma "nambah baris baru" tidak akan
+      pernah tau ada santri yang perlu DIBUANG dari daftar) -- penyaringan aktif
+      dipindah ke sisi app, saat membangun state.anggota di bawah.
+   2. Saldo TIDAK lagi ditarik dari view `saldo_santri` (view itu dihitung ulang PENUH
+      dari tabel transaksi_saldo tiap kali di-query, jadi selalu "berat" walau isinya
+      tidak berubah). Gantinya: delta sync tabel transaksi_saldo (jauh lebih kecil,
+      ratusan baris, sudah punya updated_at), lalu saldo dihitung SENDIRI di app --
+      rumusnya dibuat identik dengan definisi view saldo_santri di database (lihat
+      hitungSaldoDariTransaksi) supaya hasilnya sama persis.
+      PENTING soal keamanan transaksi: pengecekan saldo cukup/tidak yang SEBENARNYA
+      tetap dilakukan SERVER-SIDE oleh RPC belanja_toko, langsung ke view saldo_santri
+      yang live -- angka hasil hitungan lokal ini HANYA dipakai untuk tampilan di app
+      sebelum transaksi ditekan. Jadi walau cache ini telat beberapa menit, tidak ada
+      risiko salah potong saldo -- server yang tetap memutuskan.
+   Kedua delta sync ini full sekali per 24 jam (jaring pengaman: santri yang
+   dihapus/dinonaktifkan, atau baris transaksi_saldo yang dihapus -- misalnya lewat
+   tombol "Hapus Semua Data Saldo" di App Keuangan -- baru kedeteksi paling lambat di
+   full-resync berikutnya, bukan seketika). `boleh_hutang_santri` TETAP full fetch tiap
+   kali (tabel kecil/whitelist, prioritas rendah, belum ada updated_at di tabelnya). */
 function mapSantriDariSupabase(r, saldoMap, bolehHutangSet){
   return {
     id: r.id, nama: r.nama, kamar: r.kamar || '', nomorInduk: r.no_induk || '',
@@ -500,6 +535,44 @@ function mapSantriDariSupabase(r, saldoMap, bolehHutangSet){
     bolehHutang: bolehHutangSet.has(r.id)
   };
 }
+function kunciCursorSantriToko(){ return 'cursorSantriToko_v1'; }
+function kunciFullResyncSantriToko(){ return 'fullResyncSantriToko_v1'; }
+const FULL_RESYNC_SANTRI_TOKO_MS = 24*60*60*1000; // 24 jam -- jaring pengaman santri yg dihapus/tidak aktif
+const TUMPANG_DELTA_SANTRI_TOKO_MS = 2*60*1000;
+function cursorDenganTumpangSantriToko(cursor){
+  const t = Date.parse(cursor);
+  if(isNaN(t)) return cursor;
+  return new Date(t - TUMPANG_DELTA_SANTRI_TOKO_MS).toISOString();
+}
+const KOLOM_SANTRI_TOKO = 'id,nama,no_induk,kamar,aktif,updated_at';
+
+function kunciCursorTransaksiSaldo(){ return 'cursorTransaksiSaldoToko_v1'; }
+function kunciFullResyncTransaksiSaldo(){ return 'fullResyncTransaksiSaldoToko_v1'; }
+const FULL_RESYNC_TRANSAKSI_SALDO_MS = 24*60*60*1000; // 24 jam -- jaring pengaman baris yg dihapus (mis. reset saldo)
+const TUMPANG_DELTA_TRANSAKSI_SALDO_MS = 2*60*1000;
+function cursorDenganTumpangTransaksiSaldo(cursor){
+  const t = Date.parse(cursor);
+  if(isNaN(t)) return cursor;
+  return new Date(t - TUMPANG_DELTA_TRANSAKSI_SALDO_MS).toISOString();
+}
+const KOLOM_TRANSAKSI_SALDO = 'id,santri_id,jenis,jumlah,metode,status,updated_at';
+// Rumus ini SENGAJA dibuat identik dengan definisi view saldo_santri di database:
+//   setoran -> nambah, tarik -> mengurangi, bayar (metode 'saldo' atau kosong) -> mengurangi,
+//   cuma baris berstatus 'aktif' yang dihitung.
+function hitungSaldoDariTransaksi(rows){
+  const map = {};
+  (rows||[]).forEach(t=>{
+    if(t.status !== 'aktif') return;
+    let delta = 0;
+    if(t.jenis === 'setoran') delta = Number(t.jumlah)||0;
+    else if(t.jenis === 'tarik') delta = -(Number(t.jumlah)||0);
+    else if(t.jenis === 'bayar' && (t.metode === 'saldo' || !t.metode)) delta = -(Number(t.jumlah)||0);
+    else return;
+    map[t.santri_id] = (map[t.santri_id]||0) + delta;
+  });
+  return map;
+}
+
 async function muatSantriDariSupabase(){
   if(!navigator.onLine) return false;
   // Penting: JANGAN timpa saldo santri lokal kalau masih ada tiket transaksi yang menunggu
@@ -508,19 +581,79 @@ async function muatSantriDariSupabase(){
   // (santri bisa dianggap punya saldo cukup padahal sebenarnya sudah dipakai transaksi yang
   // masih tertunda) — berisiko kasir "menjual dobel" dari saldo yang sama.
   if(antrean.length > 0) return false;
-  const [{ data: santriRows, error: errSantri }, { data: saldoRows, error: errSaldo }, { data: hutangRows, error: errHutang }] = await Promise.all([
-    ambilSemuaHalaman(()=>sb.from('santri').select('id,nama,no_induk,kamar').eq('aktif', true).order('nama').order('id')),
-    ambilSemuaHalaman(()=>sb.from('saldo_santri').select('santri_id,saldo').order('santri_id')),
-    ambilSemuaHalaman(()=>sb.from('boleh_hutang_santri').select('santri_id').order('santri_id'))
-  ]);
-  if(errSantri || errSaldo){ console.error('Gagal memuat santri/saldo', errSantri||errSaldo); return false; }
-  if(errHutang) console.error('Gagal memuat daftar boleh-hutang (dianggap tidak ada yang diizinkan)', errHutang);
-  const saldoMap = {};
-  (saldoRows||[]).forEach(r=>{ saldoMap[r.santri_id] = Number(r.saldo)||0; });
-  const bolehHutangSet = new Set((hutangRows||[]).map(r=>r.santri_id));
-  state.anggota = unikByKunci(santriRows, 'id').map(r=>mapSantriDariSupabase(r, saldoMap, bolehHutangSet));
-  saveDB();
-  return true;
+  try{
+    // -- 1. santri (delta by updated_at, tanpa filter aktif -- disaring nanti) --
+    const cursorSantri = await idbGet(kunciCursorSantriToko());
+    const lastFullSantri = await idbGet(kunciFullResyncSantriToko());
+    const dueForFullSantri = !cursorSantri || !lastFullSantri || (Date.now() - Number(lastFullSantri) > FULL_RESYNC_SANTRI_TOKO_MS);
+    if(dueForFullSantri){
+      const { data, error } = await ambilSemuaHalaman(()=>sb.from('santri')
+        .select(KOLOM_SANTRI_TOKO).order('updated_at', { ascending:true }).order('id', { ascending:true }));
+      if(error){ console.error('Gagal memuat santri dari Supabase (full)', error); return false; }
+      state.anggotaSemua = unikByKunci(data||[], 'id');
+      let maxUpdated = null;
+      (data||[]).forEach(r=>{ if(r.updated_at && (!maxUpdated || r.updated_at > maxUpdated)) maxUpdated = r.updated_at; });
+      await idbSet(kunciCursorSantriToko(), maxUpdated || new Date(0).toISOString());
+      await idbSet(kunciFullResyncSantriToko(), String(Date.now()));
+    } else {
+      const batasBawah = cursorDenganTumpangSantriToko(cursorSantri);
+      const { data, error } = await ambilSemuaHalaman(()=>sb.from('santri')
+        .select(KOLOM_SANTRI_TOKO).gt('updated_at', batasBawah)
+        .order('updated_at', { ascending:true }).order('id', { ascending:true }));
+      if(error){ console.error('Gagal memuat santri dari Supabase (delta)', error); return false; }
+      if(data && data.length){
+        const byId = new Map((state.anggotaSemua||[]).map(r=>[r.id, r]));
+        data.forEach(r=>{ byId.set(r.id, r); });
+        state.anggotaSemua = Array.from(byId.values());
+        let maxUpdated = cursorSantri;
+        data.forEach(r=>{ if(r.updated_at && r.updated_at > maxUpdated) maxUpdated = r.updated_at; });
+        await idbSet(kunciCursorSantriToko(), maxUpdated);
+      }
+    }
+
+    // -- 2. transaksi_saldo (delta by updated_at, dipakai buat hitung saldo sendiri) --
+    const cursorTs = await idbGet(kunciCursorTransaksiSaldo());
+    const lastFullTs = await idbGet(kunciFullResyncTransaksiSaldo());
+    const dueForFullTs = !cursorTs || !lastFullTs || (Date.now() - Number(lastFullTs) > FULL_RESYNC_TRANSAKSI_SALDO_MS);
+    if(dueForFullTs){
+      const { data, error } = await ambilSemuaHalaman(()=>sb.from('transaksi_saldo')
+        .select(KOLOM_TRANSAKSI_SALDO).order('updated_at', { ascending:true }).order('id', { ascending:true }));
+      if(error){ console.error('Gagal memuat transaksi_saldo dari Supabase (full)', error); return false; }
+      state.transaksiSaldoCache = unikByKunci(data||[], 'id');
+      let maxUpdated = null;
+      (data||[]).forEach(r=>{ if(r.updated_at && (!maxUpdated || r.updated_at > maxUpdated)) maxUpdated = r.updated_at; });
+      await idbSet(kunciCursorTransaksiSaldo(), maxUpdated || new Date(0).toISOString());
+      await idbSet(kunciFullResyncTransaksiSaldo(), String(Date.now()));
+    } else {
+      const batasBawah = cursorDenganTumpangTransaksiSaldo(cursorTs);
+      const { data, error } = await ambilSemuaHalaman(()=>sb.from('transaksi_saldo')
+        .select(KOLOM_TRANSAKSI_SALDO).gt('updated_at', batasBawah)
+        .order('updated_at', { ascending:true }).order('id', { ascending:true }));
+      if(error){ console.error('Gagal memuat transaksi_saldo dari Supabase (delta)', error); return false; }
+      if(data && data.length){
+        const byId = new Map((state.transaksiSaldoCache||[]).map(r=>[r.id, r]));
+        data.forEach(r=>{ byId.set(r.id, r); });
+        state.transaksiSaldoCache = Array.from(byId.values());
+        let maxUpdated = cursorTs;
+        data.forEach(r=>{ if(r.updated_at && r.updated_at > maxUpdated) maxUpdated = r.updated_at; });
+        await idbSet(kunciCursorTransaksiSaldo(), maxUpdated);
+      }
+    }
+
+    // -- 3. boleh_hutang_santri (tetap full fetch, tabel kecil, tidak berubah) --
+    const { data: hutangRows, error: errHutang } = await ambilSemuaHalaman(()=>sb.from('boleh_hutang_santri').select('santri_id').order('santri_id'));
+    if(errHutang) console.error('Gagal memuat daftar boleh-hutang (dianggap tidak ada yang diizinkan)', errHutang);
+    const bolehHutangSet = new Set((hutangRows||[]).map(r=>r.santri_id));
+
+    // -- gabungkan: cuma santri aktif yang ditampilkan, saldo dihitung dari cache transaksi_saldo --
+    const saldoMap = hitungSaldoDariTransaksi(state.transaksiSaldoCache);
+    state.anggota = (state.anggotaSemua||[])
+      .filter(r=>r.aktif)
+      .map(r=>mapSantriDariSupabase(r, saldoMap, bolehHutangSet))
+      .sort((a,b)=> a.nama.localeCompare(b.nama) || String(a.id).localeCompare(String(b.id)));
+    saveDB();
+    return true;
+  }catch(e){ console.error('Gagal sinkron santri/saldo dari Supabase', e); return false; }
 }
 
 /* ============ ANTREAN SINKRON (LOCAL-FIRST) ============
