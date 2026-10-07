@@ -573,7 +573,7 @@ function hitungSaldoDariTransaksi(rows){
   return map;
 }
 
-async function muatSantriDariSupabase(){
+async function muatSantriDariSupabaseAsli(){
   if(!navigator.onLine) return false;
   // Penting: JANGAN timpa saldo santri lokal kalau masih ada tiket transaksi yang menunggu
   // dikirim — data dari server saat ini belum tentu memasukkan transaksi yang belum sinkron itu,
@@ -641,9 +641,19 @@ async function muatSantriDariSupabase(){
     }
 
     // -- 3. boleh_hutang_santri (tetap full fetch, tabel kecil, tidak berubah) --
-    const { data: hutangRows, error: errHutang } = await ambilSemuaHalaman(()=>sb.from('boleh_hutang_santri').select('santri_id').order('santri_id'));
-    if(errHutang) console.error('Gagal memuat daftar boleh-hutang (dianggap tidak ada yang diizinkan)', errHutang);
-    const bolehHutangSet = new Set((hutangRows||[]).map(r=>r.santri_id));
+    // Hemat request: daftar ini jarang berubah dan Realtime (boleh_hutang_santri) sudah memberi tahu kalau ada
+    // perubahan, jadi tidak perlu ditarik di setiap muat ulang -- cukup kalau belum ada di memori, ada event
+    // perubahan, atau sudah lebih dari TTL_BOLEH_HUTANG_MS (jaring pengaman, 6 jam).
+    let bolehHutangSet;
+    const hutangPerluDimuat = cacheBolehHutang.paksa || !cacheBolehHutang.set || (Date.now() - cacheBolehHutang.waktu > TTL_BOLEH_HUTANG_MS);
+    if(hutangPerluDimuat){
+      const { data: hutangRows, error: errHutang } = await ambilSemuaHalaman(()=>sb.from('boleh_hutang_santri').select('santri_id').order('santri_id'));
+      if(errHutang) console.error('Gagal memuat daftar boleh-hutang (dianggap tidak ada yang diizinkan)', errHutang);
+      bolehHutangSet = new Set((hutangRows||[]).map(r=>r.santri_id));
+      if(!errHutang) cacheBolehHutang = { set: bolehHutangSet, waktu: Date.now(), paksa: false };
+    } else {
+      bolehHutangSet = cacheBolehHutang.set;
+    }
 
     // -- gabungkan: cuma santri aktif yang ditampilkan, saldo dihitung dari cache transaksi_saldo --
     const saldoMap = hitungSaldoDariTransaksi(state.transaksiSaldoCache);
@@ -731,6 +741,7 @@ async function cobaSinkronSekarang(){
     const tiket = antrean[0];
     try{
       await prosesTiket(tiket);
+      catatDampakTiket(tiket);
       antrean.shift();
       simpanAntrean();
     }catch(e){
@@ -741,6 +752,7 @@ async function cobaSinkronSekarang(){
         // Sudah dicoba berkali-kali dan tetap gagal (bukan sekadar offline) — kemungkinan besar
         // datanya bermasalah (mis. ditolak server), bukan cuma koneksi. Pindahkan ke daftar "Gagal"
         // supaya TIDAK menyumbat tiket-tiket lain di belakangnya yang mungkin justru valid.
+        dampakAntrean = { produk:true, santri:true, kas:true }; // tiket gagal: dampaknya tidak pasti, muat semuanya
         antrean.shift();
         antreanGagal.push(tiket);
         simpanAntrean();
@@ -758,9 +770,14 @@ async function cobaSinkronSekarang(){
   // saatnya tarik ulang data produk & santri dari server, karena muatProdukDariSupabase /
   // muatSantriDariSupabase sengaja menolak menimpa data lokal selama antrean masih ada isinya.
   if(antrean.length === 0 && navigator.onLine){
-    muatProdukDariSupabase().then(()=>{ if(document.querySelector('.nav button[data-page="produk"].active')) renderPage('produk'); });
-    muatSantriDariSupabase();
-    muatKasDariSupabase().then(()=>{ if(document.querySelector('.nav button[data-page="kas"].active')) renderPage('kas'); });
+    // Hemat request: muat ulang hanya bagian yang disentuh tiket-tiket yang barusan terkirim (lihat
+    // catatDampakTiket). Kalau tidak ada catatan sama sekali, muat semuanya seperti sebelumnya.
+    const d = dampakAntrean;
+    dampakAntrean = { produk:false, santri:false, kas:false };
+    const semua = !(d.produk || d.santri || d.kas);
+    if(semua || d.produk) muatProdukDariSupabase().then(()=>{ if(document.querySelector('.nav button[data-page="produk"].active')) renderPage('produk'); });
+    if(semua || d.santri) muatSantriDariSupabase();
+    if(semua || d.kas) muatKasDariSupabase().then(()=>{ if(document.querySelector('.nav button[data-page="kas"].active')) renderPage('kas'); });
     sinkronRingkasanDanRiwayatToko();
   }
   perbaruiBadgeAntrean();
@@ -776,29 +793,96 @@ async function cobaSinkronSekarang(){
    cuma jaring pengaman kalau koneksi realtime terputus.
    Prinsip "jangan timpa cache selama antrean masih ada isi" (supaya urutan data tidak kacau) tetap
    dijaga penuh -- lihat masing-masing fungsi muat, tarik, sinkron yang sudah punya guard itu. */
+/* ---- Hemat request: satu pekerjaan pada satu waktu ----
+   Dulu tiap pemicu (aplikasi terlihat lagi, antrean habis, Realtime, timer, koneksi kembali) memanggil
+   loader sendiri-sendiri sehingga bisa tumpang tindih. Sekarang tiap loader hanya berjalan satu kali pada
+   satu waktu: panggilan yang datang saat loader sedang berjalan digabung jadi SATU putaran lanjutan
+   (supaya perubahan yang masuk di tengah jalan tetap terambil), bukan beberapa putaran paralel.
+   Juga mencatat kapan loader terakhir berhasil mulai -- dipakai Realtime untuk melewati muat ulang ganda. */
+// boleh_hutang_santri: sangat jarang berubah, jadi TIDAK ditarik di muat ulang biasa/timer. Ditarik hanya kalau: belum ada di
+// memori, ada event Realtime (santri ditambah/dihapus dari daftar), login, kembali setelah tersembunyi lama, koneksi kembali,
+// atau -- sebagai jaring pengaman kalau event sempat terlewat -- sudah lebih dari 6 jam.
+const TTL_BOLEH_HUTANG_MS = 6*60*60*1000;
+const TTL_TABEL_KECIL_MS = 9*60*1000; // pengaturan_kas: tarik ulang paling cepat tiap 9 menit (sedikit di bawah timer cadangan 10 menit, supaya tiap putaran timer tetap menarik ulang) kecuali ada event
+var cacheBolehHutang = { set:null, waktu:0, paksa:false };
+var cachePengaturanKas = { lokasi:null, waktu:0, paksa:false };
+var dampakAntrean = { produk:false, santri:false, kas:false };
+
+function jalankanSatuPekerjaan(nama, fungsiAsli, args){
+  const st = (jalankanSatuPekerjaan.st = jalankanSatuPekerjaan.st || {});
+  const s = (st[nama] = st[nama] || { berjalan:null, ulang:false, mulaiSukses:0 });
+  if(args && args.length) return fungsiAsli.apply(null, args); // pemanggilan khusus (pakai opsi) tidak digabung
+  if(s.berjalan){ s.ulang = true; return s.berjalan; }
+  s.berjalan = (async ()=>{
+    try{
+      let hasil;
+      do{
+        s.ulang = false;
+        const mulai = Date.now();
+        hasil = await fungsiAsli();
+        if(hasil !== false) s.mulaiSukses = mulai;
+      }while(s.ulang);
+      return hasil;
+    } finally { s.berjalan = null; }
+  })();
+  return s.berjalan;
+}
+function waktuMuatSukses(nama){
+  const st = jalankanSatuPekerjaan.st;
+  return (st && st[nama] && st[nama].mulaiSukses) || 0;
+}
+function muatSantriDariSupabase(){ return jalankanSatuPekerjaan('santri', muatSantriDariSupabaseAsli, arguments); }
+function muatProdukDariSupabase(){ return jalankanSatuPekerjaan('produk', muatProdukDariSupabaseAsli, arguments); }
+function muatKasDariSupabase(){ return jalankanSatuPekerjaan('kas', muatKasDariSupabaseAsli, arguments); }
+function sinkronRingkasanDanRiwayatToko(){ return jalankanSatuPekerjaan('ringkasan', sinkronRingkasanDanRiwayatTokoAsli, arguments); }
+
+// Bagian mana yang perlu dimuat ulang setelah sebuah tiket antrean berhasil terkirim.
+function catatDampakTiket(t){
+  const tp = t && t.tipe;
+  if(tp === 'produk_baru' || tp === 'produk_edit' || tp === 'produk_hapus'){
+    dampakAntrean.produk = true;
+  } else if(tp === 'kas_mutasi_baru' || tp === 'kas_mutasi_hapus' || tp === 'kas_awal_update'){
+    dampakAntrean.kas = true;
+    if(tp === 'kas_awal_update') cachePengaturanKas.paksa = true;
+  } else if(tp === 'transaksi_toko'){
+    dampakAntrean.produk = true; dampakAntrean.kas = true;
+    if(!(t.payload && t.payload.metode === 'tunai')) dampakAntrean.santri = true; // saldo/hutang/campuran menyentuh saldo santri
+  } else {
+    dampakAntrean = { produk:true, santri:true, kas:true }; // batal, lunas, tipe lain: muat semuanya (aman)
+  }
+}
+
 const PULL_FALLBACK_MS = 600000;   // 10 menit: jaring pengaman, bukan pemicu utama
 const REALTIME_DEBOUNCE_MS = 2000; // gabungkan beberapa event yang datang beruntun jadi 1 pull
 
 let realtimeChannel = null;
 let realtimeDebounceTimer = null;
-let realtimePerubahan = { transaksiToko:false, ringkasan:false, produk:false, santri:false, kas:false };
+// Nilai = waktu event terakhir diterima (0 = tidak ada). Dipakai untuk melewati muat ulang yang sudah
+// terlanjur dilakukan SETELAH event itu datang (mis. pantulan dari transaksi yang baru saja kita kirim sendiri).
+let realtimePerubahan = { transaksiToko:0, ringkasan:0, produk:0, santri:0, kas:0 };
+const REALTIME_DEBOUNCE_SANTRI_MS = 10000; // event santri/saldo/hutang berlaku se-organisasi dan ramai: gabungkan lebih lama
 
 function tandaiPerubahan(bagian){
-  realtimePerubahan[bagian] = true;
+  realtimePerubahan[bagian] = Date.now();
   if(realtimeDebounceTimer) clearTimeout(realtimeDebounceTimer);
-  realtimeDebounceTimer = setTimeout(prosesPerubahanRealtime, REALTIME_DEBOUNCE_MS);
+  const p = realtimePerubahan;
+  const adaSelainSantri = p.transaksiToko || p.ringkasan || p.produk || p.kas;
+  realtimeDebounceTimer = setTimeout(prosesPerubahanRealtime, adaSelainSantri ? REALTIME_DEBOUNCE_MS : REALTIME_DEBOUNCE_SANTRI_MS);
 }
 async function prosesPerubahanRealtime(){
   realtimeDebounceTimer = null;
   const tanda = realtimePerubahan;
-  realtimePerubahan = { transaksiToko:false, ringkasan:false, produk:false, santri:false, kas:false };
+  realtimePerubahan = { transaksiToko:0, ringkasan:0, produk:0, santri:0, kas:0 };
   if(!navigator.onLine || antrean.length > 0) return; // guard yang sama seperti fungsi pull lainnya
   const tugas = [];
+  // Lewati bagian yang SUDAH dimuat sukses setelah event-nya datang (data itu sudah mencakup perubahannya).
+  const sudahTermuat = (nama, waktuEvent)=> waktuMuatSukses(nama) >= waktuEvent;
   // transaksi_saldo (saldo santri) & santri & boleh_hutang_santri semuanya bermuara ke daftar anggota
-  if(tanda.santri) tugas.push(muatSantriDariSupabase().then(()=>{ if(document.querySelector('.nav button[data-page="anggota"].active')) renderPage('anggota'); }));
-  if(tanda.produk) tugas.push(muatProdukDariSupabase().then(()=>{ if(document.querySelector('.nav button[data-page="produk"].active')) renderPage('produk'); }));
-  if(tanda.kas) tugas.push(muatKasDariSupabase().then(()=>{ if(document.querySelector('.nav button[data-page="kas"].active')) renderPage('kas'); }));
-  if(tanda.transaksiToko || tanda.ringkasan || tanda.kas){
+  if(tanda.santri && !sudahTermuat('santri', tanda.santri)) tugas.push(muatSantriDariSupabase().then(()=>{ if(document.querySelector('.nav button[data-page="anggota"].active')) renderPage('anggota'); }));
+  if(tanda.produk && !sudahTermuat('produk', tanda.produk)) tugas.push(muatProdukDariSupabase().then(()=>{ if(document.querySelector('.nav button[data-page="produk"].active')) renderPage('produk'); }));
+  if(tanda.kas && !sudahTermuat('kas', tanda.kas)) tugas.push(muatKasDariSupabase().then(()=>{ if(document.querySelector('.nav button[data-page="kas"].active')) renderPage('kas'); }));
+  const waktuRingkasan = Math.max(tanda.transaksiToko, tanda.ringkasan, tanda.kas);
+  if(waktuRingkasan && !sudahTermuat('ringkasan', waktuRingkasan)){
     tugas.push(sinkronRingkasanDanRiwayatToko());
   }
   await Promise.all(tugas);
@@ -810,11 +894,11 @@ function startRealtimeSubscriptions(){
     .on('postgres_changes', { event:'*', schema:'public', table:'transaksi_toko', filter:'lokasi=eq.'+lokasiToko }, ()=>tandaiPerubahan('transaksiToko'))
     .on('postgres_changes', { event:'*', schema:'public', table:'produk', filter:'lokasi=eq.'+lokasiToko }, ()=>tandaiPerubahan('produk'))
     .on('postgres_changes', { event:'*', schema:'public', table:'kas_mutasi', filter:'lokasi=eq.'+lokasiToko }, ()=>tandaiPerubahan('kas'))
-    .on('postgres_changes', { event:'*', schema:'public', table:'pengaturan_kas', filter:'lokasi=eq.'+lokasiToko }, ()=>tandaiPerubahan('kas'))
+    .on('postgres_changes', { event:'*', schema:'public', table:'pengaturan_kas', filter:'lokasi=eq.'+lokasiToko }, ()=>{ cachePengaturanKas.paksa = true; tandaiPerubahan('kas'); })
     // Tanpa filter lokasi -- saldo/daftar santri berlaku organisasi-wide, bukan per toko:
     .on('postgres_changes', { event:'*', schema:'public', table:'transaksi_saldo' }, ()=>tandaiPerubahan('santri'))
     .on('postgres_changes', { event:'*', schema:'public', table:'santri' }, ()=>tandaiPerubahan('santri'))
-    .on('postgres_changes', { event:'*', schema:'public', table:'boleh_hutang_santri' }, ()=>tandaiPerubahan('santri'))
+    .on('postgres_changes', { event:'*', schema:'public', table:'boleh_hutang_santri' }, ()=>{ cacheBolehHutang.paksa = true; tandaiPerubahan('santri'); })
     .subscribe();
 }
 function stopRealtimeSubscriptions(){
@@ -841,14 +925,27 @@ function stopPullFallbackTimer(){
   if(pullFallbackTimer){ clearInterval(pullFallbackTimer); pullFallbackTimer = null; }
 }
 
+// Hemat request: kalau aplikasi cuma disembunyikan sebentar (kasir pindah ke aplikasi lain lalu
+// langsung balik), tidak perlu muat ulang semua data -- Realtime tersambung lagi di bawah dan
+// perubahan berikutnya tetap masuk lewat event. Muat ulang penuh hanya kalau aplikasi sempat
+// tersembunyi lebih lama dari JEDA_MUAT_ULANG_TERLIHAT_MS.
+const JEDA_MUAT_ULANG_TERLIHAT_MS = 120000; // 2 menit
+let waktuTersembunyi = 0;
+
 document.addEventListener('visibilitychange', ()=>{
   if(document.hidden){
+    waktuTersembunyi = Date.now();
     stopRealtimeSubscriptions();
     stopPullFallbackTimer();
   } else {
     startRealtimeSubscriptions();
     startPullFallbackTimer();
-    if(navigator.onLine){ muatSantriDariSupabase(); muatProdukDariSupabase(); muatKasDariSupabase(); sinkronRingkasanDanRiwayatToko(); }
+    const lamaTersembunyi = waktuTersembunyi ? (Date.now() - waktuTersembunyi) : Infinity;
+    if(navigator.onLine && lamaTersembunyi >= JEDA_MUAT_ULANG_TERLIHAT_MS){
+      // Realtime mati selama aplikasi tersembunyi, jadi perubahan tabel kecil bisa terlewat: tarik ulang juga.
+      cacheBolehHutang.paksa = true; cachePengaturanKas.paksa = true;
+      muatSantriDariSupabase(); muatProdukDariSupabase(); muatKasDariSupabase(); sinkronRingkasanDanRiwayatToko();
+    }
   }
 });
 
@@ -1072,14 +1169,22 @@ const KOLOM_KAS_MUTASI = 'id,lokasi,tanggal,arah,kategori,jumlah,catatan,updated
    tarik baris yang updated_at-nya baru (delta), lalu digabung (upsert by
    id) ke cache lokal -- BUKAN diganti total, supaya baris lama yang sudah
    ada tetap dipertahankan. */
-async function muatKasDariSupabase(opts){
+async function muatKasDariSupabaseAsli(opts){
   if(!navigator.onLine) return false;
   if(antrean.length > 0) return false; // sama seperti produk/santri: jangan tarik selama masih ada tiket kas yang menunggu dikirim
   opts = opts || {};
   try{
-    const { data: pengaturanRow, error: errPengaturan } = await sb.from('pengaturan_kas')
-      .select('kas_awal,modal_awal').eq('lokasi', lokasiToko).maybeSingle();
-    if(errPengaturan){ console.error('Gagal memuat pengaturan kas dari Supabase', errPengaturan); return false; }
+    // Hemat request: pengaturan_kas jarang berubah (dan Realtime memberi tahu kalau berubah). Kalau tidak perlu
+    // ditarik, pengaturanRow tetap null dan state.kasAwal/modalAwal yang sudah ada dipertahankan (lihat bawah).
+    let pengaturanRow = null;
+    const pengaturanPerluDimuat = cachePengaturanKas.paksa || cachePengaturanKas.lokasi !== lokasiToko || (Date.now() - cachePengaturanKas.waktu > TTL_TABEL_KECIL_MS);
+    if(pengaturanPerluDimuat){
+      const { data: dataPengaturan, error: errPengaturan } = await sb.from('pengaturan_kas')
+        .select('kas_awal,modal_awal').eq('lokasi', lokasiToko).maybeSingle();
+      if(errPengaturan){ console.error('Gagal memuat pengaturan kas dari Supabase', errPengaturan); return false; }
+      pengaturanRow = dataPengaturan;
+      cachePengaturanKas = { lokasi: lokasiToko, waktu: Date.now(), paksa: false };
+    }
 
     const cursorKey = kunciCursorKasMutasi();
     const fullKey = kunciFullResyncKasMutasi();
@@ -1290,11 +1395,12 @@ async function sinkronRingkasanToko(){
 
 // Jalankan ketiga sinkron di atas sekaligus — dipanggil saat boot, saat koneksi kembali, dan setelah
 // tiap kali transaksi/kas selesai dikirim ke server (lihat cobaSinkronSekarang & prosesTiket).
-async function sinkronRingkasanDanRiwayatToko(){
-  await Promise.all([ tarikTransaksiTokoDariSupabase(), sinkronRingkasanToko() ]);
+async function sinkronRingkasanDanRiwayatTokoAsli(){
+  const hasilBagian = await Promise.all([ tarikTransaksiTokoDariSupabase(), sinkronRingkasanToko() ]);
   if(document.querySelector('.nav button[data-page="dashboard"].active')) renderPage('dashboard');
   if(document.querySelector('.nav button[data-page="kas"].active')) renderPage('kas');
   if(document.querySelector('.nav button[data-page="laporan"].active')) renderPage('laporan');
+  return !hasilBagian.some(h=>h === false); // false kalau salah satu bagian gagal, supaya tidak dicatat "sudah termuat"
 }
 
 // Gabungkan cache resmi dari server dengan transaksi lokal yang BARU dibuat tapi belum sempat
@@ -1396,7 +1502,7 @@ function urutkanProduk(list){
   return list.slice().sort((a,b)=> a.nama.localeCompare(b.nama) || String(a.id).localeCompare(String(b.id)));
 }
 
-async function muatProdukDariSupabase(opts){
+async function muatProdukDariSupabaseAsli(opts){
   if(!navigator.onLine) return false; // biarkan pakai data cache lokal apa adanya
   // Sama seperti muatSantriDariSupabase: jangan timpa stok produk lokal kalau masih ada tiket
   // (mis. transaksi/edit produk) yang menunggu dikirim — supaya stok yang ditampilkan tidak
@@ -1527,6 +1633,7 @@ function mintaLogin(onSuccess, setiapKlik){
     // persis seperti "macet setelah login, menu bisa diklik tapi tidak masuk ke halamannya".
     if(navigator.onLine){
       toast('Menyinkronkan data...');
+      cacheBolehHutang.paksa = true; cachePengaturanKas.paksa = true; // sesi berubah anon -> authenticated: tarik ulang tabel kecil juga
       try{
         await Promise.all([
           muatProdukDariSupabase(),
@@ -3963,6 +4070,7 @@ async function bootApp(){
   if(!document.hidden){ startRealtimeSubscriptions(); startPullFallbackTimer(); }
   window.addEventListener('online', ()=>{
     toast('Koneksi kembali — menyinkronkan data...');
+    cacheBolehHutang.paksa = true; cachePengaturanKas.paksa = true; // koneksi sempat putus: event Realtime bisa terlewat
     muatProdukDariSupabase(); muatSantriDariSupabase(); muatKasDariSupabase();
     sinkronRingkasanDanRiwayatToko();
     if(!document.hidden) startRealtimeSubscriptions();
