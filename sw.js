@@ -1,4 +1,4 @@
-const CACHE_NAME = 'kasir-toko-v59-hemat-request';
+const CACHE_NAME = 'kasir-toko-v60-rpc-delta';
 const ASSETS = [
   './',
   './index.html',

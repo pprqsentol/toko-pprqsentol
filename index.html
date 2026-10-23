@@ -597,7 +597,8 @@ async function muatSantriDariSupabaseAsli(){
       await idbSet(kunciFullResyncSantriToko(), String(Date.now()));
     } else {
       const batasBawah = cursorDenganTumpangSantriToko(cursorSantri);
-      const { data, error } = await ambilSemuaHalaman(()=>sb.from('santri')
+      const preRpc = ambilPrefetchToko('santri', batasBawah);
+      const { data, error } = preRpc ? { data: preRpc.nilai, error: null } : await ambilSemuaHalaman(()=>sb.from('santri')
         .select(KOLOM_SANTRI_TOKO).gt('updated_at', batasBawah)
         .order('updated_at', { ascending:true }).order('id', { ascending:true }));
       if(error){ console.error('Gagal memuat santri dari Supabase (delta)', error); return false; }
@@ -626,7 +627,8 @@ async function muatSantriDariSupabaseAsli(){
       await idbSet(kunciFullResyncTransaksiSaldo(), String(Date.now()));
     } else {
       const batasBawah = cursorDenganTumpangTransaksiSaldo(cursorTs);
-      const { data, error } = await ambilSemuaHalaman(()=>sb.from('transaksi_saldo')
+      const preRpc = ambilPrefetchToko('transaksi_saldo', batasBawah);
+      const { data, error } = preRpc ? { data: preRpc.nilai, error: null } : await ambilSemuaHalaman(()=>sb.from('transaksi_saldo')
         .select(KOLOM_TRANSAKSI_SALDO).gt('updated_at', batasBawah)
         .order('updated_at', { ascending:true }).order('id', { ascending:true }));
       if(error){ console.error('Gagal memuat transaksi_saldo dari Supabase (delta)', error); return false; }
@@ -647,7 +649,8 @@ async function muatSantriDariSupabaseAsli(){
     let bolehHutangSet;
     const hutangPerluDimuat = cacheBolehHutang.paksa || !cacheBolehHutang.set || (Date.now() - cacheBolehHutang.waktu > TTL_BOLEH_HUTANG_MS);
     if(hutangPerluDimuat){
-      const { data: hutangRows, error: errHutang } = await ambilSemuaHalaman(()=>sb.from('boleh_hutang_santri').select('santri_id').order('santri_id'));
+      const preHutang = ambilPrefetchToko('boleh_hutang', null);
+      const { data: hutangRows, error: errHutang } = preHutang ? { data: preHutang.nilai, error: null } : await ambilSemuaHalaman(()=>sb.from('boleh_hutang_santri').select('santri_id').order('santri_id'));
       if(errHutang) console.error('Gagal memuat daftar boleh-hutang (dianggap tidak ada yang diizinkan)', errHutang);
       bolehHutangSet = new Set((hutangRows||[]).map(r=>r.santri_id));
       if(!errHutang) cacheBolehHutang = { set: bolehHutangSet, waktu: Date.now(), paksa: false };
@@ -831,10 +834,108 @@ function waktuMuatSukses(nama){
   const st = jalankanSatuPekerjaan.st;
   return (st && st[nama] && st[nama].mulaiSukses) || 0;
 }
-function muatSantriDariSupabase(){ return jalankanSatuPekerjaan('santri', muatSantriDariSupabaseAsli, arguments); }
-function muatProdukDariSupabase(){ return jalankanSatuPekerjaan('produk', muatProdukDariSupabaseAsli, arguments); }
-function muatKasDariSupabase(){ return jalankanSatuPekerjaan('kas', muatKasDariSupabaseAsli, arguments); }
-function sinkronRingkasanDanRiwayatToko(){ return jalankanSatuPekerjaan('ringkasan', sinkronRingkasanDanRiwayatTokoAsli, arguments); }
+function muatSantriDariSupabase(){ return jalankanSatuPekerjaan('santri', (...a)=> a.length ? muatSantriDariSupabaseAsli(...a) : siapkanDeltaToko('santri').then(()=>muatSantriDariSupabaseAsli()), arguments); }
+function muatProdukDariSupabase(){ return jalankanSatuPekerjaan('produk', (...a)=> a.length ? muatProdukDariSupabaseAsli(...a) : siapkanDeltaToko('produk').then(()=>muatProdukDariSupabaseAsli()), arguments); }
+function muatKasDariSupabase(){ return jalankanSatuPekerjaan('kas', (...a)=> a.length ? muatKasDariSupabaseAsli(...a) : siapkanDeltaToko('kas').then(()=>muatKasDariSupabaseAsli()), arguments); }
+function sinkronRingkasanDanRiwayatToko(){ return jalankanSatuPekerjaan('ringkasan', (...a)=> a.length ? sinkronRingkasanDanRiwayatTokoAsli(...a) : siapkanDeltaToko('ringkasan').then(()=>sinkronRingkasanDanRiwayatTokoAsli()), arguments); }
+
+/* ---- HEMAT REQUEST: semua bagian delta dalam SATU panggilan RPC (delta_sync_toko) ----
+   Sebelumnya tiap siklus muat ulang memanggil sampai 7 request terpisah (santri, transaksi_saldo, produk, kas_mutasi,
+   transaksi_toko, pengaturan_kas, v_ringkasan_toko), masing-masing tercatat di log Supabase walau hasilnya kosong.
+   Sekarang, sebelum loader-loader di atas berjalan, aplikasi mengumpulkan bagian mana saja yang sedang dalam mode
+   DELTA (kursor sudah ada & belum waktunya sinkron penuh -- aturan yang SAMA dengan yang dipakai tiap loader), lalu
+   meminta semuanya sekaligus lewat satu fungsi database. Loader tetap berjalan seperti biasa, hanya saja memakai
+   hasil RPC itu sebagai ganti query-nya sendiri. Fungsi database memakai hak pengguna yang login (RLS tetap berlaku).
+   Kalau RPC gagal, bagian itu tidak ada di hasil, atau kursornya berubah: loader otomatis memakai query lama.
+   Sinkron penuh berkala TIDAK lewat RPC (tetap jalur lama yang dipaginasi).
+   Ubah PAKAI_RPC_DELTA_TOKO jadi false untuk mematikan seluruh jalur RPC ini. */
+const PAKAI_RPC_DELTA_TOKO = true;
+const RPC_TOKO_JEDA_KUMPUL_MS = 20;   // loader yang dimulai berdekatan digabung jadi satu RPC
+const RPC_TOKO_BAGIAN_LOADER = {
+  santri:    ['santri', 'transaksi_saldo', 'boleh_hutang'],
+  produk:    ['produk'],
+  kas:       ['kas_mutasi', 'pengaturan_kas'],
+  ringkasan: ['transaksi_toko', 'ringkasan']
+};
+const RPC_TOKO_PARAM_KURSOR = {
+  santri: 'p_cursor_santri', transaksi_saldo: 'p_cursor_transaksi_saldo', produk: 'p_cursor_produk',
+  kas_mutasi: 'p_cursor_kas_mutasi', transaksi_toko: 'p_cursor_transaksi_toko'
+};
+function rpcTokoInfoDelta(){
+  return {
+    santri:          { kunciCursor: kunciCursorSantriToko,     kunciFull: kunciFullResyncSantriToko,     interval: FULL_RESYNC_SANTRI_TOKO_MS,     tumpang: cursorDenganTumpangSantriToko },
+    transaksi_saldo: { kunciCursor: kunciCursorTransaksiSaldo, kunciFull: kunciFullResyncTransaksiSaldo, interval: FULL_RESYNC_TRANSAKSI_SALDO_MS, tumpang: cursorDenganTumpangTransaksiSaldo },
+    produk:          { kunciCursor: kunciCursorProduk,         kunciFull: kunciFullResyncProduk,         interval: FULL_RESYNC_PRODUK_MS,          tumpang: cursorDenganTumpangProduk },
+    kas_mutasi:      { kunciCursor: kunciCursorKasMutasi,      kunciFull: kunciFullResyncKasMutasi,      interval: FULL_RESYNC_KAS_MUTASI_MS,      tumpang: cursorDenganTumpangKasMutasi },
+    transaksi_toko:  { kunciCursor: kunciCursorTransaksiToko,  kunciFull: kunciFullResyncTransaksiToko,  interval: FULL_RESYNC_TRANSAKSI_TOKO_MS,  tumpang: cursorDenganTumpang }
+  };
+}
+let prefetchToko = {};      // bagian -> { batasBawah, nilai, waktu }  (sekali pakai)
+let kumpulRpcToko = null;   // { nama:Set, selesai:Promise }
+
+function siapkanDeltaToko(namaLoader){
+  if(!PAKAI_RPC_DELTA_TOKO || !navigator.onLine || antrean.length > 0) return Promise.resolve();
+  if(!kumpulRpcToko){
+    const k = { nama: new Set(), selesai: null };
+    k.selesai = new Promise(selesai => {
+      setTimeout(async ()=>{
+        if(kumpulRpcToko === k) kumpulRpcToko = null;
+        try{ await jalankanPrefetchToko(k.nama); }
+        catch(e){ console.warn('RPC delta_sync_toko gagal, pakai query lama per tabel:', e); }
+        selesai();
+      }, RPC_TOKO_JEDA_KUMPUL_MS);
+    });
+    kumpulRpcToko = k;
+  }
+  kumpulRpcToko.nama.add(namaLoader);
+  return kumpulRpcToko.selesai;
+}
+
+async function jalankanPrefetchToko(namaSet){
+  const minta = new Set();
+  namaSet.forEach(n => (RPC_TOKO_BAGIAN_LOADER[n] || []).forEach(b => minta.add(b)));
+  const info = rpcTokoInfoDelta();
+  const params = { p_lokasi: lokasiToko, p_bagian: [] };
+  const batasPerBagian = {};
+  for(const b of minta){
+    if(info[b]){
+      const cursor = await idbGet(info[b].kunciCursor());
+      const lastFull = await idbGet(info[b].kunciFull());
+      const dueForFull = !cursor || !lastFull || (Date.now() - Number(lastFull) > info[b].interval);
+      if(dueForFull) continue;                       // loader akan sinkron penuh lewat jalur lama
+      const batasBawah = info[b].tumpang(cursor);
+      params.p_bagian.push(b); params[RPC_TOKO_PARAM_KURSOR[b]] = batasBawah; batasPerBagian[b] = batasBawah;
+    } else if(b === 'boleh_hutang'){
+      if(!(cacheBolehHutang.paksa || !cacheBolehHutang.set || (Date.now() - cacheBolehHutang.waktu > TTL_BOLEH_HUTANG_MS))) continue;
+      params.p_bagian.push(b); batasPerBagian[b] = null;
+    } else if(b === 'pengaturan_kas'){
+      if(!(cachePengaturanKas.paksa || cachePengaturanKas.lokasi !== lokasiToko || (Date.now() - cachePengaturanKas.waktu > TTL_TABEL_KECIL_MS))) continue;
+      params.p_bagian.push(b); batasPerBagian[b] = null;
+    } else if(b === 'ringkasan'){
+      params.p_bagian.push(b); batasPerBagian[b] = null;
+    }
+  }
+  if(!params.p_bagian.length) return;
+  const { data, error } = await sb.rpc('delta_sync_toko', params);
+  if(error) throw error;
+  if(!data || typeof data !== 'object') return;
+  const tidakDipakai = new Set(data.fallback || []);
+  const waktu = Date.now();
+  params.p_bagian.forEach(b => {
+    if(tidakDipakai.has(b) || !(b in data)) return;  // melebihi batas / tidak ada: loader pakai query lama
+    prefetchToko[b] = { batasBawah: batasPerBagian[b], nilai: data[b], waktu };
+  });
+}
+
+// Dipakai loader: ambil hasil RPC untuk satu bagian (sekali pakai). null = pakai query lama.
+function ambilPrefetchToko(bagian, batasBawah){
+  const p = prefetchToko[bagian];
+  if(!p) return null;
+  delete prefetchToko[bagian];
+  if(Date.now() - p.waktu > 30000) return null;                // sudah basi
+  if(String(p.batasBawah) !== String(batasBawah)) return null; // kursor berubah sejak diminta
+  return p;
+}
 
 // Bagian mana yang perlu dimuat ulang setelah sebuah tiket antrean berhasil terkirim.
 function catatDampakTiket(t){
@@ -1179,7 +1280,8 @@ async function muatKasDariSupabaseAsli(opts){
     let pengaturanRow = null;
     const pengaturanPerluDimuat = cachePengaturanKas.paksa || cachePengaturanKas.lokasi !== lokasiToko || (Date.now() - cachePengaturanKas.waktu > TTL_TABEL_KECIL_MS);
     if(pengaturanPerluDimuat){
-      const { data: dataPengaturan, error: errPengaturan } = await sb.from('pengaturan_kas')
+      const prePengaturan = ambilPrefetchToko('pengaturan_kas', null);
+      const { data: dataPengaturan, error: errPengaturan } = prePengaturan ? { data: prePengaturan.nilai, error: null } : await sb.from('pengaturan_kas')
         .select('kas_awal,modal_awal').eq('lokasi', lokasiToko).maybeSingle();
       if(errPengaturan){ console.error('Gagal memuat pengaturan kas dari Supabase', errPengaturan); return false; }
       pengaturanRow = dataPengaturan;
@@ -1205,7 +1307,8 @@ async function muatKasDariSupabaseAsli(opts){
       // Delta: cuma baris yang updated_at-nya lebih baru dari cursor -- gabungkan (upsert by id)
       // ke riwayat kas yang sudah ada, BUKAN menarik ulang semuanya.
       const batasBawah = cursorDenganTumpangKasMutasi(cursor);
-      const { data, error } = await ambilSemuaHalaman(()=>sb.from('kas_mutasi')
+      const preRpc = ambilPrefetchToko('kas_mutasi', batasBawah);
+      const { data, error } = preRpc ? { data: preRpc.nilai, error: null } : await ambilSemuaHalaman(()=>sb.from('kas_mutasi')
         .select(KOLOM_KAS_MUTASI).eq('lokasi', lokasiToko).gt('updated_at', batasBawah)
         .order('updated_at', { ascending:true }).order('id', { ascending:true }));
       if(error){ console.error('Gagal memuat data kas dari Supabase (delta)', error); return false; }
@@ -1312,7 +1415,9 @@ async function tarikTransaksiTokoDariSupabase(opts){
       // (upsert by id) ke cache lama, BUKAN menimpa semuanya.
       let semua = [];
       const batasBawah = cursorDenganTumpang(cursor); // cursor asli tetap dipakai untuk menghitung cursor baru di bawah
-      for(let dari=0; ; dari+=HALAMAN){
+      const preRpc = ambilPrefetchToko('transaksi_toko', batasBawah);
+      if(preRpc) semua = preRpc.nilai;
+      else for(let dari=0; ; dari+=HALAMAN){
         const { data, error } = await sb.from('transaksi_toko').select(KOLOM_TRANSAKSI_TOKO)
           .eq('lokasi', lokasiToko).gt('updated_at', batasBawah).order('updated_at', { ascending:true }).order('id', { ascending:true })
           .range(dari, dari+HALAMAN-1);
@@ -1383,7 +1488,8 @@ async function sinkronRingkasanToko(){
   if(!navigator.onLine) return false;
   if(antrean.length > 0) return false; // ada tiket menunggu -> angka di server belum termasuk perubahan itu, jangan timpa cache dulu
   try{
-    const { data, error } = await sb.from('v_ringkasan_toko')
+    const preRingkasan = ambilPrefetchToko('ringkasan', null);
+    const { data, error } = preRingkasan ? { data: preRingkasan.nilai, error: null } : await sb.from('v_ringkasan_toko')
       .select('lokasi,kas_awal,modal_awal,saldo_kas,nilai_stok,piutang,omzet_kumulatif,modal_terjual_kumulatif,laba_kumulatif,biaya_operasional_kumulatif,prive_kumulatif,modal_saat_ini')
       .eq('lokasi', lokasiToko).maybeSingle();
     if(error){ console.error('Gagal sinkron v_ringkasan_toko', error); return false; }
@@ -1529,7 +1635,8 @@ async function muatProdukDariSupabaseAsli(opts){
       // Delta: cuma baris yang updated_at-nya lebih baru dari cursor -- gabungkan (upsert by id)
       // ke daftar produk yang sudah ada, BUKAN menimpa semuanya.
       const batasBawah = cursorDenganTumpangProduk(cursor);
-      const { data, error } = await ambilSemuaHalaman(()=>sb.from('produk')
+      const preRpc = ambilPrefetchToko('produk', batasBawah);
+      const { data, error } = preRpc ? { data: preRpc.nilai, error: null } : await ambilSemuaHalaman(()=>sb.from('produk')
         .select(KOLOM_PRODUK).eq('lokasi', lokasiToko).gt('updated_at', batasBawah)
         .order('updated_at', { ascending:true }).order('id', { ascending:true }));
       if(error){ console.error('Gagal memuat produk dari Supabase (delta)', error); return false; }
